@@ -13,18 +13,46 @@
 #define UX_COLOR_ACCENT COLOR_ORANGE
 #define UX_COLOR_ACCENT2 YELLOW
 
-M5Canvas oldCanvas(&M5Cardputer.Display);
+enum KeyboardInput
+{
+  TextInput,
+  ChangeTab,
+  None
+};
 
-// TODO: extract drawing functionality to class
+struct Message
+{
+  // TODO: timestamp, sender ID, etc.
+  // time_t timestamp;
+  bool isSender;
+  String text;
+  int rssi;
+};
+
+struct Tab
+{
+  unsigned char channel;
+  std::vector<Message> messages;
+  String messageBuffer;
+  int viewIndex;
+};
+
+LoRa_E220_JP lora;
+struct LoRaConfigItem_t loraConfig;
+struct RecvFrame_t loraFrame;
+
+volatile bool receivedMessage = false;
+volatile KeyboardInput keyboardInput = KeyboardInput::None;
+bool repeatMode = false;
+
+// TODO: extract drawing functionality to class?
 M5Canvas *canvas;
 M5Canvas *canvasSystemBar;
 M5Canvas *canvasTabBar;
 
 unsigned short activeTabIndex;
 const unsigned short TabCount = 5;
-
-const unsigned long debounceDelay = 200;
-unsigned long lastKeyPressMillis = 0;
+Tab tabs[TabCount];
 
 int w = 240; // M5Cardputer.Display.width();
 int h = 135; // M5Cardputer.Display.height();
@@ -48,42 +76,73 @@ int wh = h - wy - m;
 int batteryPct = M5Cardputer.Power.getBatteryLevel();
 int updateDelay = 0;
 
-struct Message
-{
-  // TODO: timestamp, sender ID, etc.
-  // time_t timestamp;
-  bool isSender;
-  String text;
-};
+// String generateRandomMessage()
+// {
+//   std::srand(millis());
+//   std::vector<String> messages = {
+//       "Hello, world!",
+//       "How are you today?",
+//       "Coding is fun!",
+//       "Random messages are cool!",
+//       "Have a great day!",
+//       "C++ is awesome!",
+//       "Keep calm and code on!",
+//       "Make it simple but significant.",
+//       "The best way to predict the future is to invent it.",
+//       "Do or do not. There is no try.",
+//       "Stay hungry, stay foolish.",
+//       "The only limit is your imagination.",
+//       "Failure is the opportunity to begin again more intelligently.",
+//       "In coding we trust.",
+//       "May the code be with you!",
+//       "Life is 10% what happens to us and 90% how we react to it.",
+//       "Dream big, work hard, stay focused.",
+//       "Success is not final, failure is not fatal: It is the courage to continue that counts.",
+//       "Believe you can and you're halfway there.",
+//       "The harder you work for something, the greater you'll feel when you achieve it.",
+//       "The only way to do great work is to love what you do.",
+//       "It always seems impossible until it's done.",
+//       "Success is stumbling from failure to failure with no loss of enthusiasm."};
+//   int randomIndex = std::rand() % messages.size();
+//   return messages[randomIndex];
+// }
 
-struct Tab
+// splits string at whitespace into lines of max length
+std::vector<String> getMessageLines(const String &s, int maxLength)
 {
-  unsigned char channel;
-  std::vector<Message> messages;
-  String messageBuffer;
-  int viewIndex;
-};
-Tab tabs[5];
+  std::vector<String> result;
+  String currentLine;
+  String word;
 
-SPIClass SPI2;
-void checkForMenuBoot()
-{
-  M5Cardputer.update();
-
-  if (M5Cardputer.Keyboard.isKeyPressed('a'))
+  for (char c : s)
   {
-    SPI2.begin(M5.getPin(m5::pin_name_t::sd_spi_sclk),
-               M5.getPin(m5::pin_name_t::sd_spi_miso),
-               M5.getPin(m5::pin_name_t::sd_spi_mosi),
-               M5.getPin(m5::pin_name_t::sd_spi_ss));
-    while (!SD.begin(M5.getPin(m5::pin_name_t::sd_spi_ss), SPI2))
+    if (std::isspace(c))
     {
-      delay(500);
+      if (currentLine.length() + word.length() <= maxLength)
+      {
+        currentLine += (currentLine.isEmpty() ? "" : " ") + word;
+        word.clear();
+      }
+      else
+      {
+        result.push_back(currentLine);
+        currentLine.clear();
+        word.clear();
+      }
     }
-
-    updateFromFS(SD, "/menu.bin");
-    ESP.restart();
+    else
+    {
+      word += c;
+    }
   }
+
+  if (!currentLine.isEmpty() || !word.isEmpty())
+  {
+    currentLine += (currentLine.isEmpty() ? "" : " ") + word;
+    result.push_back(currentLine);
+  }
+
+  return result;
 }
 
 void drawSystemBar()
@@ -100,7 +159,6 @@ void drawSystemBar()
   canvasSystemBar->pushSprite(sx, sy);
 }
 
-
 void drawTabBar()
 {
   canvasTabBar->fillSprite(BG_COLOR);
@@ -108,7 +166,7 @@ void drawTabBar()
   int tabf = 5;
   // int taby = tabf;
 
-  //unsigned short color[] = {UX_COLOR_DARK, UX_COLOR_MED, UX_COLOR_LIGHT, UX_COLOR_ACCENT, UX_COLOR_ACCENT2};
+  // unsigned short color[] = {UX_COLOR_DARK, UX_COLOR_MED, UX_COLOR_LIGHT, UX_COLOR_ACCENT, UX_COLOR_ACCENT2};
   for (int i = 4; i >= -1; i--)
   {
     // draw active tab last/on top
@@ -116,7 +174,8 @@ void drawTabBar()
     {
       continue;
     }
-    else if (i < 0) {
+    else if (i < 0)
+    {
       i = activeTabIndex;
     }
 
@@ -138,36 +197,6 @@ void drawTabBar()
     }
   }
   canvasTabBar->pushSprite(tx, ty);
-}
-
-// splits string at whitespace into lines of max length
-std::vector<String> getMessageLines(const String &s, int maxLength)
-{
-    std::vector<String> result;
-    String currentLine;
-    String word;
-
-    for (char c : s) {
-        if (std::isspace(c)) {
-            if (currentLine.length() + word.length() <= maxLength) {
-                currentLine += (currentLine.isEmpty() ? "" : " ") + word;
-                word.clear();
-            } else {
-                result.push_back(currentLine);
-                currentLine.clear();
-                word.clear();
-            }
-        } else {
-            word += c;
-        }
-    }
-
-    if (!currentLine.isEmpty() || !word.isEmpty()) {
-        currentLine += (currentLine.isEmpty() ? "" : " ") + word;
-        result.push_back(currentLine);
-    }
-
-    return result;
 }
 
 void drawWindow()
@@ -252,98 +281,162 @@ void drawWindow()
   canvas->pushSprite(wx, wy);
 }
 
-String generateRandomMessage()
+SPIClass SPI2;
+void checkForMenuBoot()
 {
-  std::srand(millis());
-  std::vector<String> messages = {
-      "Hello, world!",
-      "How are you today?",
-      "Coding is fun!",
-      "Random messages are cool!",
-      "Have a great day!",
-      "C++ is awesome!",
-      "Keep calm and code on!",
-      "Make it simple but significant.",
-      "The best way to predict the future is to invent it.",
-      "Do or do not. There is no try.",
-      "Stay hungry, stay foolish.",
-      "The only limit is your imagination.",
-      "Failure is the opportunity to begin again more intelligently.",
-      "In coding we trust.",
-      "May the code be with you!",
-      "Life is 10% what happens to us and 90% how we react to it.",
-      "Dream big, work hard, stay focused.",
-      "Success is not final, failure is not fatal: It is the courage to continue that counts.",
-      "Believe you can and you're halfway there.",
-      "The harder you work for something, the greater you'll feel when you achieve it.",
-      "The only way to do great work is to love what you do.",
-      "It always seems impossible until it's done.",
-      "Success is stumbling from failure to failure with no loss of enthusiasm."};
-  int randomIndex = std::rand() % messages.size();
-  return messages[randomIndex];
-}
+  M5Cardputer.update();
 
-int cursorX = 0;
-int cursorY = 0;
-
-bool receiveMessage(String message)
-{
-  // USBSerial.println(message);
-  tabs[activeTabIndex].messages.push_back({false, message});
-  return true;
-}
-
-enum KeyboardCommand
-{
-  TextInput,
-  ChangeTab,
-  None
-};
-
-KeyboardCommand waitForKeyboardInput()
-{
-  KeyboardCommand command = KeyboardCommand::None;
-
-  if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed())
+  if (M5Cardputer.Keyboard.isKeyPressed('a'))
   {
-    unsigned long currentMillis = millis();
-    if (currentMillis - lastKeyPressMillis >= debounceDelay)
+    SPI2.begin(M5.getPin(m5::pin_name_t::sd_spi_sclk),
+               M5.getPin(m5::pin_name_t::sd_spi_miso),
+               M5.getPin(m5::pin_name_t::sd_spi_mosi),
+               M5.getPin(m5::pin_name_t::sd_spi_ss));
+    while (!SD.begin(M5.getPin(m5::pin_name_t::sd_spi_ss), SPI2))
     {
-      lastKeyPressMillis = currentMillis;
-      Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
+      delay(500);
+    }
 
-      for (auto i : status.word)
-      {
-        // TODO: max length
-        tabs[activeTabIndex].messageBuffer += i;
-        command = KeyboardCommand::TextInput;
-      }
+    updateFromFS(SD, "/menu.bin");
+    ESP.restart();
+  }
+}
 
-      if (status.del && tabs[activeTabIndex].messageBuffer.length() > 0)
-      {
-        tabs[activeTabIndex].messageBuffer.remove(tabs[activeTabIndex].messageBuffer.length() - 1);
-        command = KeyboardCommand::TextInput;
-        // TODO: remove last char from display when not redrawing full sprite
-      }
+void checkForRepeatMode()
+{
+  M5Cardputer.update();
 
-      if (status.enter)
-      {
-        USBSerial.println(tabs[activeTabIndex].messageBuffer);
+  if (M5Cardputer.Keyboard.isKeyPressed('r'))
+  {
+    repeatMode = true;
+  }
+}
 
-        tabs[activeTabIndex].messageBuffer.trim();
-        tabs[activeTabIndex].messages.push_back({true, tabs[activeTabIndex].messageBuffer});
-        tabs[activeTabIndex].messageBuffer.clear();
-        command = KeyboardCommand::TextInput;
-      }
-      else if (status.tab)
+void loraInit()
+{
+  lora.Init(&Serial2, 9600, SERIAL_8N1, 1, 2);
+  lora.SetDefaultConfigValue(loraConfig);
+
+  M5Cardputer.update();
+  if (M5Cardputer.Keyboard.isKeyPressed('c'))
+  {
+    USBSerial.println("reconfigure, pls pull the M0,M1 to 1");
+    USBSerial.println("or click Btn to skip");
+
+    loraConfig.own_address = 0x0000;
+    loraConfig.baud_rate = BAUD_9600;
+    loraConfig.air_data_rate = BW125K_SF9;
+    loraConfig.subpacket_size = SUBPACKET_200_BYTE;
+    loraConfig.rssi_ambient_noise_flag = RSSI_AMBIENT_NOISE_ENABLE;
+    loraConfig.transmitting_power = TX_POWER_13dBm;
+    loraConfig.own_channel = 0x00;
+    loraConfig.rssi_byte_flag = RSSI_BYTE_ENABLE;
+    loraConfig.transmission_method_type = UART_P2P_MODE;
+    loraConfig.lbt_flag = LBT_DISABLE;
+    loraConfig.wor_cycle = WOR_2000MS;
+    loraConfig.encryption_key = 0x1031;
+    loraConfig.target_address = 0x0000;
+    loraConfig.target_channel = 0x00;
+
+    while (lora.InitLoRaSetting(loraConfig) != 0)
+      ;
+  }
+  else
+  {
+    lora.InitLoRaSetting(loraConfig);
+  }
+  USBSerial.println("init succeeded, pls pull the M0,M1 to 0");
+}
+
+void loraRecvTask(void *pvParameters)
+{
+  while (1)
+  {
+    if (lora.RecieveFrame(&loraFrame) == 0)
+    {
+      // for (int i = 0; i < data.recv_data_len; i++) {
+      //     message += data.recv_data[i];
+      // }
+
+      String message = String(loraFrame.recv_data, loraFrame.recv_data_len);
+      tabs[activeTabIndex].messages.push_back({false, message, loraFrame.rssi});
+      receivedMessage = true;
+
+      if (repeatMode)
       {
-        activeTabIndex = (activeTabIndex + 1) % TabCount;
-        command = KeyboardCommand::ChangeTab;
+        String response = String("message: " + message + ", rssi: " + String(loraFrame.rssi));
+        if (lora.SendFrame(loraConfig, (uint8_t*)response.c_str(), response.length()) == 0)
+        {
+          tabs[activeTabIndex].messages.push_back({true, tabs[activeTabIndex].messageBuffer});
+        }
       }
     }
-  }
 
-  return command;
+    // tabs[activeTabIndex].messages.push_back({false, message, 0});
+    delay(1);
+  }
+}
+
+void keyboardInputTask(void *pvParameters)
+{
+  const unsigned long debounceDelay = 200;
+  unsigned long lastKeyPressMillis = 0;
+
+  while (1)
+  {
+    M5Cardputer.update();
+    auto newInput = KeyboardInput::None;
+    if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed())
+    {
+      unsigned long currentMillis = millis();
+      if (currentMillis - lastKeyPressMillis >= debounceDelay)
+      {
+        lastKeyPressMillis = currentMillis;
+        Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
+
+        for (auto i : status.word)
+        {
+          // TODO: max length
+          tabs[activeTabIndex].messageBuffer += i;
+          newInput = KeyboardInput::TextInput;
+        }
+
+        if (status.del && tabs[activeTabIndex].messageBuffer.length() > 0)
+        {
+          tabs[activeTabIndex].messageBuffer.remove(tabs[activeTabIndex].messageBuffer.length() - 1);
+          newInput = KeyboardInput::TextInput;
+        }
+
+        if (status.enter)
+        {
+          USBSerial.println(tabs[activeTabIndex].messageBuffer);
+
+          tabs[activeTabIndex].messageBuffer.trim();
+
+          uint8_t *frameData = (uint8_t *)tabs[activeTabIndex].messageBuffer.c_str();
+          int frameDataLength = tabs[activeTabIndex].messageBuffer.length();
+          if (lora.SendFrame(loraConfig, frameData, frameDataLength) == 0)
+          {
+            tabs[activeTabIndex].messages.push_back({true, tabs[activeTabIndex].messageBuffer});
+          }
+          else
+          {
+            tabs[activeTabIndex].messages.push_back({true, "ERRORTODO"});
+          }
+          // tabs[activeTabIndex].messages.push_back({true, tabs[activeTabIndex].messageBuffer});
+          tabs[activeTabIndex].messageBuffer.clear();
+          newInput = KeyboardInput::TextInput;
+        }
+        else if (status.tab)
+        {
+          activeTabIndex = (activeTabIndex + 1) % TabCount;
+          newInput = KeyboardInput::ChangeTab;
+        }
+      }
+
+      keyboardInput = newInput;
+    }
+  }
 }
 
 void setup()
@@ -352,11 +445,15 @@ void setup()
   auto cfg = M5.config();
   M5Cardputer.begin(cfg, true);
 
+  delay(1000);
+  USBSerial.println("setup");
+
   checkForMenuBoot();
+  checkForRepeatMode();
 
   M5Cardputer.Display.init();
   M5Cardputer.Display.setRotation(1);
-  // M5Cardputer.Display.setBrightness(100);
+  M5Cardputer.Display.setBrightness(repeatMode ? 0 : 70);
 
   canvas = new M5Canvas(&M5Cardputer.Display);
   canvas->createSprite(ww, wh);
@@ -375,25 +472,37 @@ void setup()
   drawSystemBar();
   drawTabBar();
   drawWindow();
+
+  loraInit();
+
+  xTaskCreateUniversal(loraRecvTask, "loraRecvTask", 8192, NULL, 1, NULL, APP_CPU_NUM);
+  xTaskCreateUniversal(keyboardInputTask, "keyboardInputTask", 8192, NULL, 1, NULL, APP_CPU_NUM);
 }
 
-unsigned long delayTimer = -1;
 void loop()
 {
-  M5Cardputer.update();
+  // primarily handles drawing state changes from input/receive tasks
 
-  KeyboardCommand command = waitForKeyboardInput();
-  switch (command)
+  switch (keyboardInput)
   {
-  case KeyboardCommand::TextInput:
-    drawWindow();
+  case KeyboardInput::None:
     break;
-  case KeyboardCommand::ChangeTab:
+  case KeyboardInput::TextInput:
+    drawWindow();
+    keyboardInput = KeyboardInput::None;
+    break;
+  case KeyboardInput::ChangeTab:
     drawTabBar();
     drawWindow();
+    keyboardInput = KeyboardInput::None;
     break;
-  case KeyboardCommand::None:
-    break;
+  }
+
+  if (receivedMessage)
+  {
+    receivedMessage = false;
+    
+    drawWindow();
   }
 
   // redraw occcasionally for battery and bt connection status updates
@@ -406,11 +515,7 @@ void loop()
       batteryPct = newBatteryPct;
       drawSystemBar();
     }
-
-    // TEMP: debug incoming msgs
-    if (receiveMessage(generateRandomMessage()))
-    {
-      drawWindow();
-    }
   }
+
+  delay(100);
 }
