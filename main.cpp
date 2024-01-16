@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <EEPROM.h>
 #include <M5Cardputer.h>
 #include <M5StackUpdater.h>
 #include <M5_LoRa_E220_JP.h>
@@ -20,19 +21,23 @@ enum KeyboardInput
   None
 };
 
-struct Message
+// TODO: refine message format
+struct LoRaMessage
 {
-  // TODO: timestamp, sender ID, etc.
-  // time_t timestamp;
-  bool isSender;
-  String text;
+  uint8_t nonce : 6;
+  uint8_t channel : 2;
+  char username[6]; // use MAC or something tied to device?
+  // unsigned long millis; // used to synchronize with local clock for relative timestamps
   int rssi;
+  char text[100]; // make variable?
 };
 
+// TODO: rename Channel, ChatTab?
 struct Tab
 {
   unsigned char channel;
-  std::vector<Message> messages;
+  // TODO: access in thread-safe way
+  std::vector<LoRaMessage> messages;
   String messageBuffer;
   int viewIndex;
 };
@@ -40,8 +45,9 @@ struct Tab
 LoRa_E220_JP lora;
 struct LoRaConfigItem_t loraConfig;
 struct RecvFrame_t loraFrame;
+uint8_t loraNonce = 0; // todo: save??
 
-volatile bool receivedMessage = false;
+volatile bool receivedMessage = false; // signal to redraw window
 volatile KeyboardInput keyboardInput = KeyboardInput::None;
 bool repeatMode = false;
 
@@ -50,28 +56,35 @@ M5Canvas *canvas;
 M5Canvas *canvasSystemBar;
 M5Canvas *canvasTabBar;
 
+// tab state
 unsigned short activeTabIndex;
 const unsigned short TabCount = 5;
 Tab tabs[TabCount];
 
-int w = 240; // M5Cardputer.Display.width();
-int h = 135; // M5Cardputer.Display.height();
-int m = 3;
+// settings
+const uint8_t MaxUsernameLength = 6;
+char username[MaxUsernameLength] = "nonik";
+float chatTextSize = 1.0;
 
-int sx = m;
-int sy = m;
-int sw = w - 2 * m;
-int sh = 18;
+// display layout constants
+const int w = 240; // M5Cardputer.Display.width();
+const int h = 135; // M5Cardputer.Display.height();
+const int m = 3;
 
-int tx = m;
-int ty = sy + sh + m;
-int tw = 18;
-int th = h - ty - m;
+const int sx = m;
+const int sy = 0;
+const int sw = w - 2 * m;
+const int sh = 18;
 
-int wx = tw;
-int wy = sy + sh + m;
-int ww = w - wx - m;
-int wh = h - wy - m;
+const int tx = m;
+const int ty = sy + sh + m;
+const int tw = 18;
+const int th = h - ty - m;
+
+const int wx = tw;
+const int wy = sy + sh + m;
+const int ww = w - wx - m;
+const int wh = h - wy - m;
 
 int batteryPct = M5Cardputer.Power.getBatteryLevel();
 int updateDelay = 0;
@@ -107,25 +120,40 @@ int updateDelay = 0;
 //   return messages[randomIndex];
 // }
 
-// splits string at whitespace into lines of max length
-std::vector<String> getMessageLines(const String &s, int maxLength)
+void printHexDump(const void *data, size_t size)
 {
-  std::vector<String> result;
+  const unsigned char *bytes = static_cast<const unsigned char *>(data);
+
+  for (size_t i = 0; i < size; ++i)
+  {
+    USBSerial.printf("%02x ", bytes[i]);
+    if ((i + 1) % 16 == 0)
+    {
+      printf("\n");
+    }
+  }
+  USBSerial.print("\n");
+}
+
+// splits string at whitespace into lines of max length
+std::vector<String> getMessageLines(const String &message, int lineWidth)
+{
+  std::vector<String> messageLines;
   String currentLine;
   String word;
 
-  for (char c : s)
+  for (char c : message)
   {
     if (std::isspace(c))
     {
-      if (currentLine.length() + word.length() <= maxLength)
+      if (currentLine.length() + word.length() <= lineWidth)
       {
         currentLine += (currentLine.isEmpty() ? "" : " ") + word;
         word.clear();
       }
       else
       {
-        result.push_back(currentLine);
+        messageLines.push_back(currentLine);
         currentLine.clear();
         word.clear();
       }
@@ -139,23 +167,32 @@ std::vector<String> getMessageLines(const String &s, int maxLength)
   if (!currentLine.isEmpty() || !word.isEmpty())
   {
     currentLine += (currentLine.isEmpty() ? "" : " ") + word;
-    result.push_back(currentLine);
+    messageLines.push_back(currentLine);
   }
 
-  return result;
+  // USBSerial.printf("text: %s\n", message.text.c_str());
+  // USBSerial.printf("lines:");
+  // for (String line : lines)
+  // {
+  //   USBSerial.printf("[%s]", line.c_str());
+  // }
+  // USBSerial.println();
+
+  return messageLines;
 }
 
 void drawSystemBar()
 {
   canvasSystemBar->fillSprite(BG_COLOR);
-  canvasSystemBar->fillRoundRect(0, 0, sw, sh, 3, UX_COLOR_DARK);
+  canvasSystemBar->fillRoundRect(sx, sy, sw, sh, 3, UX_COLOR_DARK);
   canvasSystemBar->setTextColor(TFT_SILVER, UX_COLOR_DARK);
   canvasSystemBar->setTextDatum(middle_center);
   canvasSystemBar->setTextSize(1);
-  canvasSystemBar->drawString("LoRaChat", sw / 2, sh / 2);
+  canvasSystemBar->drawString("LoRaChat", sw / 2, sy + sh / 2);
   canvasSystemBar->setTextDatum(middle_left);
-  canvasSystemBar->drawString("nonik", m, sh / 2);
-  draw_battery_indicator(canvasSystemBar, sw - 32, sh / 2, batteryPct);
+  canvasSystemBar->drawString(username, m, sy + sh / 2);
+  draw_rssi_indicator(canvasSystemBar, sw - 64, sy + sh / 2, batteryPct);
+  draw_battery_indicator(canvasSystemBar, sw - 32, sy + sh / 2, batteryPct);
   canvasSystemBar->pushSprite(sx, sy);
 }
 
@@ -164,10 +201,8 @@ void drawTabBar()
   canvasTabBar->fillSprite(BG_COLOR);
   int tabh = (th + 4 * m) / 5;
   int tabf = 5;
-  // int taby = tabf;
 
-  // unsigned short color[] = {UX_COLOR_DARK, UX_COLOR_MED, UX_COLOR_LIGHT, UX_COLOR_ACCENT, UX_COLOR_ACCENT2};
-  for (int i = 4; i >= -1; i--)
+  for (int i = 4;; i--)
   {
     // draw active tab last/on top
     if (i == activeTabIndex)
@@ -180,16 +215,30 @@ void drawTabBar()
     }
 
     unsigned short color = (i == activeTabIndex) ? UX_COLOR_ACCENT : UX_COLOR_DARK;
-
     int taby = tabf + i * tabh - i * m;
+
     // tab shape
     canvasTabBar->fillTriangle(0, taby, tw, taby, tw, taby - tabf, color);
     canvasTabBar->fillRect(0, taby, tw, tabh - 2 * tabf, color);
     canvasTabBar->fillTriangle(0, taby + tabh - 2 * tabf, tw, taby + tabh - 2 * tabf, tw, taby + tabh - tabf, color);
-    // label
-    canvasTabBar->setTextColor(TFT_SILVER, color);
-    canvasTabBar->setTextDatum(middle_center);
-    canvasTabBar->drawString(String(i), tw / 2 - 1, taby + tabh / 2 - tabf / 2 - 1);
+
+    // label/icon
+    switch (i)
+    {
+    case 0:
+    case 1:
+    case 2:
+      canvasTabBar->setTextColor(TFT_SILVER, color);
+      canvasTabBar->setTextDatum(middle_center);
+      canvasTabBar->drawString(String(char('A' + i)), tw / 2 - 1, taby + tabh / 2 - tabf / 2 - 1);
+      break;
+    case 3:
+      draw_user_icon(canvasTabBar, tw / 2 - 2, taby + tabh / 2 - tabf / 2 - 3);
+      break;
+    case 4:
+      draw_wrench_icon(canvasTabBar, tw / 2 - 2, taby + tabh / 2 - tabf / 2 - 3);
+      break;
+    }
 
     if (i == activeTabIndex)
     {
@@ -199,15 +248,8 @@ void drawTabBar()
   canvasTabBar->pushSprite(tx, ty);
 }
 
-void drawWindow()
+void drawChatWindow()
 {
-  // TODO: avoid complete redraw each time by scrolling text if possible?
-
-  canvas->fillSprite(BG_COLOR);
-  canvas->fillRoundRect(0, 0, ww, wh, 3, UX_COLOR_MED);
-  canvas->setTextColor(TFT_SILVER, UX_COLOR_MED);
-  canvas->setTextDatum(top_left);
-
   // TODO: only change when font changes
   int rowCount = (wh - 2 * m) / (canvas->fontHeight() + m) - 1;
   int colCount = (ww - 2 * m) / canvas->fontWidth() - 1;
@@ -215,7 +257,7 @@ void drawWindow()
   int messageBufferY = wh - messageBufferHeight;
 
   // draw message buffer
-  for (int i = 0; i < m; i++)
+  for (int i = -1; i <= 1; i++)
   {
     canvas->drawLine(0, messageBufferY + i, ww, messageBufferY + i, UX_COLOR_DARK);
   }
@@ -228,25 +270,19 @@ void drawWindow()
   // draw message window
   if (tabs[activeTabIndex].messages.size() > 0)
   {
-    int messagesDrawn = 0;
+    int linesDrawn = 0;
 
     // draw all messages or until window is full
+    // TODO: view index, scrolling
     for (int i = tabs[activeTabIndex].messages.size() - 1; i >= 0; i--)
     {
-      Message message = tabs[activeTabIndex].messages[i];
+      LoRaMessage message = tabs[activeTabIndex].messages[i];
+      // TODO: username
       std::vector<String> lines = getMessageLines(message.text, colCount);
-
-      // USBSerial.printf("text: %s\n", message.text.c_str());
-      // USBSerial.printf("lines:");
-      // for (String line : lines)
-      // {
-      //   USBSerial.printf("[%s]", line.c_str());
-      // }
-      // USBSerial.println();
 
       int cursorX;
 
-      if (message.isSender)
+      if (std::strncmp(message.username, username, MaxUsernameLength) == 0)
       {
         cursorX = ww - m;
         canvas->setTextDatum(top_right);
@@ -259,23 +295,51 @@ void drawWindow()
 
       for (int j = lines.size() - 1; j >= 0; j--)
       {
-        String line = lines[j];
+        int cursorY = m + (rowCount - linesDrawn - 1) * (canvas->fontHeight() + m);
+        canvas->drawString(lines[j], cursorX, cursorY);
+        linesDrawn++;
 
-        int cursorY = m + (rowCount - messagesDrawn - 1) * (canvas->fontHeight() + m);
-        canvas->drawString(line, cursorX, cursorY);
-
-        messagesDrawn++;
-        if (messagesDrawn >= rowCount)
+        if (linesDrawn >= rowCount)
         {
           break;
         }
       }
-
-      if (messagesDrawn >= rowCount)
-      {
-        break;
-      }
     }
+  }
+}
+
+void drawSettingsWindow()
+{
+  canvas->fillSprite(BG_COLOR);
+  canvas->fillRoundRect(0, 0, ww, wh, 3, UX_COLOR_MED);
+  canvas->setTextColor(TFT_SILVER, UX_COLOR_MED);
+  canvas->setTextDatum(top_left);
+
+  canvas->drawString("Settings", m, m);
+  canvas->drawString("Name", m, m + canvas->fontHeight() + m);
+  canvas->drawString("Lora Coonfig", m, m + 2 * (canvas->fontHeight() + m));
+}
+
+void drawWindow()
+{
+  // TODO: avoid complete redraw each time by scrolling text if possible?
+
+  canvas->fillSprite(BG_COLOR);
+  canvas->fillRoundRect(0, 0, ww, wh, 3, UX_COLOR_MED);
+  canvas->setTextColor(TFT_SILVER, UX_COLOR_MED);
+  canvas->setTextDatum(top_left);
+
+  switch (activeTabIndex)
+  {
+  case 0:
+  case 1:
+  case 2:
+  case 3:
+    drawChatWindow();
+    break;
+  case 4:
+    drawSettingsWindow();
+    break;
   }
 
   canvas->pushSprite(wx, wy);
@@ -320,23 +384,23 @@ void loraInit()
   M5Cardputer.update();
   if (M5Cardputer.Keyboard.isKeyPressed('c'))
   {
-    USBSerial.println("reconfigure, pls pull the M0,M1 to 1");
-    USBSerial.println("or click Btn to skip");
+    USBSerial.println("M0, M1 switches should be set to 1 to write new config register values to LoRa module");
 
-    loraConfig.own_address = 0x0000;
-    loraConfig.baud_rate = BAUD_9600;
-    loraConfig.air_data_rate = BW125K_SF9;
-    loraConfig.subpacket_size = SUBPACKET_200_BYTE;
-    loraConfig.rssi_ambient_noise_flag = RSSI_AMBIENT_NOISE_ENABLE;
-    loraConfig.transmitting_power = TX_POWER_13dBm;
-    loraConfig.own_channel = 0x00;
-    loraConfig.rssi_byte_flag = RSSI_BYTE_ENABLE;
-    loraConfig.transmission_method_type = UART_P2P_MODE;
-    loraConfig.lbt_flag = LBT_DISABLE;
-    loraConfig.wor_cycle = WOR_2000MS;
-    loraConfig.encryption_key = 0x1031;
-    loraConfig.target_address = 0x0000;
-    loraConfig.target_channel = 0x00;
+    // these are all default values
+    // loraConfig.own_address = 0x0000;
+    // loraConfig.baud_rate = BAUD_9600;
+    // loraConfig.air_data_rate = BW125K_SF9;
+    // loraConfig.subpacket_size = SUBPACKET_200_BYTE;
+    // loraConfig.rssi_ambient_noise_flag = RSSI_AMBIENT_NOISE_ENABLE;
+    // loraConfig.transmitting_power = TX_POWER_13dBm;
+    // loraConfig.own_channel = 0x00;
+    // loraConfig.rssi_byte_flag = RSSI_BYTE_ENABLE;
+    // loraConfig.transmission_method_type = UART_P2P_MODE;
+    // loraConfig.lbt_flag = LBT_DISABLE;
+    // loraConfig.wor_cycle = WOR_2000MS;
+    // loraConfig.encryption_key = 0x1031;
+    // loraConfig.target_address = 0x0000;
+    // loraConfig.target_channel = 0x00;
 
     while (lora.InitLoRaSetting(loraConfig) != 0)
       ;
@@ -345,34 +409,103 @@ void loraInit()
   {
     lora.InitLoRaSetting(loraConfig);
   }
-  USBSerial.println("init succeeded, pls pull the M0,M1 to 0");
 }
 
-void loraRecvTask(void *pvParameters)
+void loraCreateFrame(const String &messageText, uint8_t *frameData, size_t &frameDataLength)
+{
+  // Ensure the data array has enough space
+  // if (length < sizeof(message) + strlen(message.text) + 1) {
+  //   std::cerr << "Error: Insufficient space to create the message." << std::endl;
+  //   return;
+  // }
+
+  unsigned long timestamp = millis();
+
+  frameData[0] = (loraNonce & 0x3F) | ((tabs[activeTabIndex].channel & 0x03) << 6);
+  std::memcpy(frameData + 1, username, MaxUsernameLength);
+  // std::memcpy(frameData + 7, static_cast<const void*>(&timestamp), sizeof(unsigned long));
+  std::memcpy(frameData + MaxUsernameLength + 1, messageText.c_str(), messageText.length() + 1);
+  frameDataLength = MaxUsernameLength + messageText.length() + 2;
+}
+
+void loraParseFrame(const uint8_t *frameData, size_t frameDataLength, LoRaMessage &message)
+{
+  if (frameDataLength < 8) // TODO: max
+    return;
+
+  message.nonce = (frameData[0] & 0x3F);
+  message.channel = ((frameData[0] >> 6) & 0x03);
+  std::memcpy(message.username, frameData + 1, 6);
+  // frame.millis = *reinterpret_cast<const unsigned long *>(data + sizeof(unsigned long));
+  size_t messageLength = frameDataLength - 7;
+  std::memcpy(message.text, frameData + 7, messageLength);
+  message.text[messageLength] = '\0';
+
+  USBSerial.printf("|%d|%d|%s|%s|\n", message.nonce, message.channel, message.username, message.text);
+}
+
+bool loraSendMessage(const String &messageText, LoRaMessage &sentMessage)
+{
+  uint8_t frameData[201]; // TODO: correct max size
+  size_t frameDataLength;
+  loraCreateFrame(messageText, frameData, frameDataLength);
+
+  USBSerial.print("sending frame: ");
+  printHexDump(frameData, frameDataLength);
+
+  if (lora.SendFrame(loraConfig, frameData, frameDataLength) == 0)
+  {
+    USBSerial.println("sent!");
+    sentMessage.channel = tabs[activeTabIndex].channel;
+    sentMessage.nonce = loraNonce++;
+    std::memcpy(sentMessage.username, username, 6);
+    std::memcpy(sentMessage.text, tabs[activeTabIndex].messageBuffer.c_str(), tabs[activeTabIndex].messageBuffer.length() + 1);
+    sentMessage.rssi = 0;
+
+    return true;
+  }
+  else
+  {
+    USBSerial.println("failed!");
+  }
+
+  return false;
+}
+
+void loraReceiveTask(void *pvParameters)
 {
   while (1)
   {
-    if (lora.RecieveFrame(&loraFrame) == 0)
+    if (lora.ReceiveFrame(&loraFrame) == 0)
     {
-      // for (int i = 0; i < data.recv_data_len; i++) {
-      //     message += data.recv_data[i];
-      // }
+      USBSerial.print("received frame: ");
+      printHexDump(loraFrame.recv_data, loraFrame.recv_data_len);
 
-      String message = String(loraFrame.recv_data, loraFrame.recv_data_len);
-      tabs[activeTabIndex].messages.push_back({false, message, loraFrame.rssi});
+      LoRaMessage message;
+      loraParseFrame(loraFrame.recv_data, loraFrame.recv_data_len, message);
+      message.rssi = loraFrame.rssi;
+
+      // TODO: check nonce/channel, etc
+
+      tabs[message.channel].messages.push_back(message);
       receivedMessage = true;
 
       if (repeatMode)
       {
-        String response = String("message: " + message + ", rssi: " + String(loraFrame.rssi));
-        if (lora.SendFrame(loraConfig, (uint8_t*)response.c_str(), response.length()) == 0)
+        String response = String("message: " + String(message.text) + ", rssi: " + String(loraFrame.rssi));
+        LoRaMessage sentMessage;
+        if (loraSendMessage(response, sentMessage))
         {
-          tabs[activeTabIndex].messages.push_back({true, tabs[activeTabIndex].messageBuffer});
+          tabs[activeTabIndex].messages.push_back(sentMessage);
         }
+        // TODO:
       }
     }
+    else
+    {
+      // TODO log
+    }
 
-    // tabs[activeTabIndex].messages.push_back({false, message, 0});
     delay(1);
   }
 }
@@ -385,9 +518,9 @@ void keyboardInputTask(void *pvParameters)
   while (1)
   {
     M5Cardputer.update();
-    auto newInput = KeyboardInput::None;
     if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed())
     {
+      KeyboardInput input = KeyboardInput::None;
       unsigned long currentMillis = millis();
       if (currentMillis - lastKeyPressMillis >= debounceDelay)
       {
@@ -398,13 +531,13 @@ void keyboardInputTask(void *pvParameters)
         {
           // TODO: max length
           tabs[activeTabIndex].messageBuffer += i;
-          newInput = KeyboardInput::TextInput;
+          input = KeyboardInput::TextInput;
         }
 
         if (status.del && tabs[activeTabIndex].messageBuffer.length() > 0)
         {
           tabs[activeTabIndex].messageBuffer.remove(tabs[activeTabIndex].messageBuffer.length() - 1);
-          newInput = KeyboardInput::TextInput;
+          input = KeyboardInput::TextInput;
         }
 
         if (status.enter)
@@ -413,28 +546,28 @@ void keyboardInputTask(void *pvParameters)
 
           tabs[activeTabIndex].messageBuffer.trim();
 
-          uint8_t *frameData = (uint8_t *)tabs[activeTabIndex].messageBuffer.c_str();
-          int frameDataLength = tabs[activeTabIndex].messageBuffer.length();
-          if (lora.SendFrame(loraConfig, frameData, frameDataLength) == 0)
+          LoRaMessage sentMessage;
+          if (loraSendMessage(tabs[activeTabIndex].messageBuffer, sentMessage))
           {
-            tabs[activeTabIndex].messages.push_back({true, tabs[activeTabIndex].messageBuffer});
+            tabs[activeTabIndex].messages.push_back(sentMessage);
           }
           else
           {
-            tabs[activeTabIndex].messages.push_back({true, "ERRORTODO"});
+            strcpy(sentMessage.text, "send failed");
+            tabs[activeTabIndex].messages.push_back(sentMessage);
           }
-          // tabs[activeTabIndex].messages.push_back({true, tabs[activeTabIndex].messageBuffer});
+
           tabs[activeTabIndex].messageBuffer.clear();
-          newInput = KeyboardInput::TextInput;
+          input = KeyboardInput::TextInput;
         }
         else if (status.tab)
         {
           activeTabIndex = (activeTabIndex + 1) % TabCount;
-          newInput = KeyboardInput::ChangeTab;
+          input = KeyboardInput::ChangeTab;
         }
       }
 
-      keyboardInput = newInput;
+      keyboardInput = input;
     }
   }
 }
@@ -475,7 +608,7 @@ void setup()
 
   loraInit();
 
-  xTaskCreateUniversal(loraRecvTask, "loraRecvTask", 8192, NULL, 1, NULL, APP_CPU_NUM);
+  xTaskCreateUniversal(loraReceiveTask, "loraReceiveTask", 8192, NULL, 1, NULL, APP_CPU_NUM);
   xTaskCreateUniversal(keyboardInputTask, "keyboardInputTask", 8192, NULL, 1, NULL, APP_CPU_NUM);
 }
 
@@ -501,7 +634,6 @@ void loop()
   if (receivedMessage)
   {
     receivedMessage = false;
-    
     drawWindow();
   }
 
