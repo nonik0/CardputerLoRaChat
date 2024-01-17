@@ -162,6 +162,8 @@ std::vector<String> getMessageLines(const String &message, int lineWidth)
       {
         messageLines.push_back(currentLine);
         currentLine.clear();
+
+        currentLine += word; // TODO: word too long, hyphenate
         word.clear();
       }
     }
@@ -177,13 +179,18 @@ std::vector<String> getMessageLines(const String &message, int lineWidth)
     messageLines.push_back(currentLine);
   }
 
-  // USBSerial.printf("text: %s\n", message.text.c_str());
-  // USBSerial.printf("lines:");
-  // for (String line : lines)
-  // {
-  //   USBSerial.printf("[%s]", line.c_str());
-  // }
-  // USBSerial.println();
+  if (messageLines.size() > 1)
+  {
+    USBSerial.println("getMessageLines");
+    USBSerial.printf("lineWidth: %d\n", lineWidth);
+    USBSerial.printf("message: %s\n", message.c_str());
+    USBSerial.println("lines:");
+    for (String line : messageLines)
+    {
+      USBSerial.printf("[%s]\n", line.c_str());
+    }
+    USBSerial.println();
+  }
 
   return messageLines;
 }
@@ -198,8 +205,8 @@ void drawSystemBar()
   canvasSystemBar->drawString("LoRaChat", sw / 2, sy + sh / 2);
   canvasSystemBar->setTextDatum(middle_left);
   canvasSystemBar->drawString(username, sx + m, sy + sh / 2);
-  draw_rssi_indicator(canvasSystemBar, sw - 64, sy + sh / 2, batteryPct);
-  draw_battery_indicator(canvasSystemBar, sw - 32, sy + sh / 2, batteryPct);
+  draw_rssi_indicator(canvasSystemBar, sw - 60, sy + sh / 2, batteryPct);
+  draw_battery_indicator(canvasSystemBar, sw - 30, sy + sh / 2, batteryPct);
   canvasSystemBar->pushSprite(sx, sy);
 }
 
@@ -260,6 +267,7 @@ void drawChatWindow()
   // TODO: only change when font changes
   int rowCount = (wh - 2 * m) / (canvas->fontHeight() + m) - 1;
   int colCount = (ww - 2 * m) / canvas->fontWidth() - 1;
+  int messageWidth = (colCount * 3) / 4;
   int messageBufferHeight = wh - ((canvas->fontHeight() + m) * rowCount) - m; // buffer takes last row plus extra space
   int messageBufferY = wh - messageBufferHeight;
 
@@ -286,9 +294,6 @@ void drawChatWindow()
       LoRaMessage message = tabs[activeTabIndex].messages[i];
       bool isOwnMessage = message.username.isEmpty();
 
-      // USBSerial.printf("drawing message: %s, isOwn: %d\n", message.text.c_str(), isOwnMessage);
-
-      std::vector<String> lines = getMessageLines(message.text, colCount);
       int cursorX;
       if (isOwnMessage)
       {
@@ -297,26 +302,33 @@ void drawChatWindow()
       }
       else
       {
-        cursorX = m;
+        cursorX = m + 1;
         canvas->setTextDatum(top_left);
-        lines.insert(lines.begin(), message.username);
+        message.text = String(message.username.c_str()) + " " + message.text; // TODO fix this hack?
       }
 
+      std::vector<String> lines = getMessageLines(message.text, messageWidth);
       for (int j = lines.size() - 1; j >= 0; j--)
       {
         int cursorY = m + (rowCount - linesDrawn - 1) * (canvas->fontHeight() + m);
-
+        //canvas->setTextColor(TFT_SILVER);
         if (j == 0 && !isOwnMessage)
         {
-          canvas->setTextColor(UX_COLOR_ACCENT);
-          canvas->drawRoundRect(cursorX - 2, cursorY - 2, canvas->fontWidth() * message.username.length() - 3, canvas->fontHeight() + 4, 2, UX_COLOR_ACCENT);
+          int usernameWidth = canvas->fontWidth() * message.username.length();
+
+          canvas->setTextColor(UX_COLOR_ACCENT2);
+          canvas->drawString(lines[j].substring(0, message.username.length()), cursorX, cursorY);
+          canvas->drawRoundRect(cursorX - 2, cursorY - 2, usernameWidth - 3, canvas->fontHeight() + 4, 2, UX_COLOR_ACCENT);
+
+          canvas->setTextColor(TFT_SILVER);
+          canvas->drawString(lines[j].substring(message.username.length()), cursorX + usernameWidth, cursorY);
         }
         else
         {
           canvas->setTextColor(TFT_SILVER);
+          canvas->drawString(lines[j], cursorX, cursorY);
         }
-
-        canvas->drawString(lines[j], cursorX, cursorY);
+ 
         linesDrawn++;
 
         if (linesDrawn >= rowCount)
@@ -536,7 +548,7 @@ void loraReceiveTask(void *pvParameters)
 
       if (repeatMode)
       {
-        String response = String("message: " + String(message.text) + ", rssi: " + String(loraFrame.rssi));
+        String response = String("name: " + String(message.username) + ", msg: " + String(message.text) + ", rssi: " + String(loraFrame.rssi));
         LoRaMessage sentMessage;
         if (loraSendMessage(response, sentMessage, message.channel))
         {
