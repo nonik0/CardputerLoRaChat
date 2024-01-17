@@ -27,10 +27,10 @@ struct LoRaMessage
 {
   uint8_t nonce : 6;
   uint8_t channel : 2;
-  char username[6]; // use MAC or something tied to device?
+  String username; // use MAC or something tied to device?
   // unsigned long millis; // used to synchronize with local clock for relative timestamps
   int rssi;
-  char text[100]; // make variable?
+  String text;
 };
 
 // TODO: rename Channel, ChatTab?
@@ -284,12 +284,13 @@ void drawChatWindow()
     for (int i = tabs[activeTabIndex].messages.size() - 1; i >= 0; i--)
     {
       LoRaMessage message = tabs[activeTabIndex].messages[i];
-      // TODO: username
+      bool isOwnMessage = message.username.isEmpty();
+
+      // USBSerial.printf("drawing message: %s, isOwn: %d\n", message.text.c_str(), isOwnMessage);
+
       std::vector<String> lines = getMessageLines(message.text, colCount);
-
       int cursorX;
-
-      if (std::strncmp(message.username, username.c_str(), MaxUsernameLength) == 0)
+      if (isOwnMessage)
       {
         cursorX = ww - m;
         canvas->setTextDatum(top_right);
@@ -298,11 +299,23 @@ void drawChatWindow()
       {
         cursorX = m;
         canvas->setTextDatum(top_left);
+        lines.insert(lines.begin(), message.username);
       }
 
       for (int j = lines.size() - 1; j >= 0; j--)
       {
         int cursorY = m + (rowCount - linesDrawn - 1) * (canvas->fontHeight() + m);
+
+        if (j == 0 && !isOwnMessage)
+        {
+          canvas->setTextColor(UX_COLOR_ACCENT);
+          canvas->drawRoundRect(cursorX - 2, cursorY - 2, canvas->fontWidth() * message.username.length() - 3, canvas->fontHeight() + 4, 2, UX_COLOR_ACCENT);
+        }
+        else
+        {
+          canvas->setTextColor(TFT_SILVER);
+        }
+
         canvas->drawString(lines[j], cursorX, cursorY);
         linesDrawn++;
 
@@ -331,10 +344,10 @@ void drawSettingsWindow()
       settingOffset + 4 * (m + canvas->fontHeight() + m)};
 
   String settingLines[SettingsCount] = {
-      "Name: " + username,
+      "Username: " + username,
       "Text Size: " + String(chatTextSize),
       "Repeat Mode: " + String(repeatMode ? "On" : "Off"),
-      "LorA Settings: TBD"};
+      "LoRa Settings: TBD"};
 
   canvas->drawString("Settings", settingX, m);
 
@@ -444,11 +457,8 @@ void loraCreateFrame(const String &messageText, uint8_t *frameData, size_t &fram
   //   return;
   // }
 
-  unsigned long timestamp = millis();
-
   frameData[0] = (loraNonce & 0x3F) | ((tabs[activeTabIndex].channel & 0x03) << 6);
   std::memcpy(frameData + 1, username.c_str(), min(username.length() + 1, (unsigned int)MaxUsernameLength));
-  // std::memcpy(frameData + 7, static_cast<const void*>(&timestamp), sizeof(unsigned long));
   std::memcpy(frameData + MaxUsernameLength + 1, messageText.c_str(), messageText.length() + 1);
   frameDataLength = MaxUsernameLength + messageText.length() + 2;
 }
@@ -460,13 +470,22 @@ void loraParseFrame(const uint8_t *frameData, size_t frameDataLength, LoRaMessag
 
   message.nonce = (frameData[0] & 0x3F);
   message.channel = ((frameData[0] >> 6) & 0x03);
-  std::memcpy(message.username, frameData + 1, 6);
-  // frame.millis = *reinterpret_cast<const unsigned long *>(data + sizeof(unsigned long));
+  message.username = String((const char *)(frameData + 1), MaxUsernameLength);
   size_t messageLength = frameDataLength - 7;
-  std::memcpy(message.text, frameData + 7, messageLength);
-  message.text[messageLength] = '\0';
+  message.text = String((const char *)(frameData + 7), messageLength - 1);
 
-  USBSerial.printf("|%d|%d|%s|%s|\n", message.nonce, message.channel, message.username, message.text);
+  // USBSerial.print("username: ");
+  // for (int i = 0; i < MaxUsernameLength; i++)
+  // {
+  //   USBSerial.printf("%02x ", message.username[i]);
+  // }
+  // USBSerial.print("\nmessage: ");
+  // for (int i = 0; i < messageLength; i++)
+  // {
+  //   USBSerial.printf("%02x ", message.text[i]);
+  // }
+  // USBSerial.println();
+  USBSerial.printf("|%d|%d|%s|%s|\n", message.nonce, message.channel, message.username, message.text.c_str());
 }
 
 bool loraSendMessage(const String &messageText, LoRaMessage &sentMessage)
@@ -483,8 +502,8 @@ bool loraSendMessage(const String &messageText, LoRaMessage &sentMessage)
     USBSerial.println("sent!");
     sentMessage.channel = tabs[activeTabIndex].channel;
     sentMessage.nonce = loraNonce++;
-    std::memcpy(sentMessage.username, username.c_str(), min(username.length() + 1, (unsigned int)MaxUsernameLength));
-    std::memcpy(sentMessage.text, tabs[activeTabIndex].messageBuffer.c_str(), tabs[activeTabIndex].messageBuffer.length() + 1);
+    sentMessage.username = "";
+    sentMessage.text = tabs[activeTabIndex].messageBuffer;
     sentMessage.rssi = 0;
 
     return true;
@@ -593,7 +612,7 @@ void handleChatTabInput(Keyboard_Class::KeysState keyState, Redraw &input)
     }
     else
     {
-      strcpy(sentMessage.text, "send failed");
+      sentMessage.text = "send failed";
       tabs[activeTabIndex].messages.push_back(sentMessage);
     }
 
