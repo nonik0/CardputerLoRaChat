@@ -488,7 +488,7 @@ void loraParseFrame(const uint8_t *frameData, size_t frameDataLength, LoRaMessag
   USBSerial.printf("|%d|%d|%s|%s|\n", message.nonce, message.channel, message.username, message.text.c_str());
 }
 
-bool loraSendMessage(const String &messageText, LoRaMessage &sentMessage)
+bool loraSendMessage(const String &messageText, LoRaMessage &sentMessage, int channel = -1)
 {
   uint8_t frameData[201]; // TODO: correct max size
   size_t frameDataLength;
@@ -500,7 +500,7 @@ bool loraSendMessage(const String &messageText, LoRaMessage &sentMessage)
   if (lora.SendFrame(loraConfig, frameData, frameDataLength) == 0)
   {
     USBSerial.println("sent!");
-    sentMessage.channel = tabs[activeTabIndex].channel;
+    sentMessage.channel = channel < 0 ? tabs[activeTabIndex].channel : channel;
     sentMessage.nonce = loraNonce++;
     sentMessage.username = "";
     sentMessage.text = tabs[activeTabIndex].messageBuffer;
@@ -538,7 +538,7 @@ void loraReceiveTask(void *pvParameters)
       {
         String response = String("message: " + String(message.text) + ", rssi: " + String(loraFrame.rssi));
         LoRaMessage sentMessage;
-        if (loraSendMessage(response, sentMessage))
+        if (loraSendMessage(response, sentMessage, message.channel))
         {
           tabs[activeTabIndex].messages.push_back(sentMessage);
         }
