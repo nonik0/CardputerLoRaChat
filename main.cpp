@@ -6,13 +6,8 @@
 
 #include "draw_helper.h"
 
-// color palette, eventually configurable
-#define BG_COLOR BLACK
-#define UX_COLOR_DARK COLOR_DARKGRAY
-#define UX_COLOR_MED COLOR_MEDGRAY
-#define UX_COLOR_LIGHT COLOR_LIGHTGRAY
-#define UX_COLOR_ACCENT COLOR_ORANGE
-#define UX_COLOR_ACCENT2 YELLOW
+#define PING_INTERVAL_MS 1000 * 60        // 1 minute
+#define PRESENCE_TIMEOUT_MS 1000 * 60 * 5 // 5 minutes, the time before a msg "expires" for the purposes of tracking a user presence
 
 enum Redraw
 {
@@ -26,12 +21,20 @@ enum Redraw
 struct LoRaMessage
 {
   uint8_t nonce : 6;
-  uint8_t channel : 2;
-  String username; // use MAC or something tied to device?
-  // unsigned long millis; // used to synchronize with local clock for relative timestamps
+  uint8_t channel : 2; // 4 channels, 0b00->ping,0b01,0b10,0b11 are 3 channels
+  String username;     // use MAC or something tied to device?
   int rssi;
   String text;
 };
+
+// track presence of other users
+struct Presence
+{
+  String username;
+  int rssi;
+  unsigned long lastSeenMillis;
+};
+std::vector<Presence> presence;
 
 // TODO: rename Channel, ChatTab?
 struct Tab
@@ -47,31 +50,41 @@ LoRa_E220_JP lora;
 struct LoRaConfigItem_t loraConfig;
 struct RecvFrame_t loraFrame;
 uint8_t loraNonce = 0; // todo: save??
-
+unsigned long lastSentMillis = 0;
 volatile bool receivedMessage = false; // signal to redraw window
-volatile Redraw keyboardInput = Redraw::None;
-bool repeatMode = false;
 
 // TODO: extract drawing functionality to class?
 M5Canvas *canvas;
 M5Canvas *canvasSystemBar;
 M5Canvas *canvasTabBar;
+volatile Redraw keyboardInput = Redraw::None; // tracks what to redraw with kb input
 
 // tab state
 uint8_t activeTabIndex;
-
-uint8_t activeSettingIndex;
-const int SettingsCount = 4;
-
+const uint8_t UserInfoTabIndex = 3;
+const uint8_t SettingsTabIndex = 4;
 const uint8_t TabCount = 5;
-const uint8_t UserInfoTabIndex = TabCount - 2;
-const uint8_t SettingsTabIndex = TabCount - 1;
 Tab tabs[TabCount];
 
 // settings
+enum Settings
+{
+  Username = 0,
+  Brightness = 1,
+  TextSize = 2,
+  PingMode = 3,
+  RepeatMode = 4,
+  LoRaSettings = 5
+};
+const int SettingsCount = 6;
+uint8_t activeSettingIndex;
+const uint8_t MinUsernameLength = 2; // TODO
 const uint8_t MaxUsernameLength = 6;
 String username = "nick";
-float chatTextSize = 1.0;
+short brightness = 70;
+float chatTextSize = 1.0; // TODO: S, M, L?
+bool pingMode = true;
+bool repeatMode = false;
 
 // display layout constants
 const uint8_t w = 240; // M5Cardputer.Display.width();
@@ -93,39 +106,10 @@ const uint8_t wy = sy + sh + m;
 const uint8_t ww = w - wx - m;
 const uint8_t wh = h - wy - m;
 
+// track state of system bar elements for redraws
 uint8_t batteryPct = M5Cardputer.Power.getBatteryLevel();
+int maxRssi = -1000;
 int updateDelay = 0;
-
-// String generateRandomMessage()
-// {
-//   std::srand(millis());
-//   std::vector<String> messages = {
-//       "Hello, world!",
-//       "How are you today?",
-//       "Coding is fun!",
-//       "Random messages are cool!",
-//       "Have a great day!",
-//       "C++ is awesome!",
-//       "Keep calm and code on!",
-//       "Make it simple but significant.",
-//       "The best way to predict the future is to invent it.",
-//       "Do or do not. There is no try.",
-//       "Stay hungry, stay foolish.",
-//       "The only limit is your imagination.",
-//       "Failure is the opportunity to begin again more intelligently.",
-//       "In coding we trust.",
-//       "May the code be with you!",
-//       "Life is 10% what happens to us and 90% how we react to it.",
-//       "Dream big, work hard, stay focused.",
-//       "Success is not final, failure is not fatal: It is the courage to continue that counts.",
-//       "Believe you can and you're halfway there.",
-//       "The harder you work for something, the greater you'll feel when you achieve it.",
-//       "The only way to do great work is to love what you do.",
-//       "It always seems impossible until it's done.",
-//       "Success is stumbling from failure to failure with no loss of enthusiasm."};
-//   int randomIndex = std::rand() % messages.size();
-//   return messages[randomIndex];
-// }
 
 void printHexDump(const void *data, size_t size)
 {
@@ -142,7 +126,6 @@ void printHexDump(const void *data, size_t size)
   USBSerial.print("\n");
 }
 
-// splits string at whitespace into lines of max length
 std::vector<String> getMessageLines(const String &message, int lineWidth)
 {
   std::vector<String> messageLines;
@@ -179,20 +162,40 @@ std::vector<String> getMessageLines(const String &message, int lineWidth)
     messageLines.push_back(currentLine);
   }
 
-  if (messageLines.size() > 1)
+  return messageLines;
+}
+
+int getPresenceRssi()
+{
+  int maxRssiAllUsers = -1000;
+
+  for (auto presence : presence)
   {
-    USBSerial.println("getMessageLines");
-    USBSerial.printf("lineWidth: %d\n", lineWidth);
-    USBSerial.printf("message: %s\n", message.c_str());
-    USBSerial.println("lines:");
-    for (String line : messageLines)
+    // only consider presences that have been seen recently
+    if (presence.rssi > maxRssiAllUsers && millis() - presence.lastSeenMillis < PRESENCE_TIMEOUT_MS)
     {
-      USBSerial.printf("[%s]\n", line.c_str());
+      maxRssiAllUsers = presence.rssi;
     }
-    USBSerial.println();
   }
 
-  return messageLines;
+  if (maxRssiAllUsers == -1000)
+    USBSerial.println("no presence found");
+  return maxRssiAllUsers;
+}
+
+void recordPresence(const LoRaMessage &message)
+{
+  for (int i = 0; i < presence.size(); i++)
+  {
+    if (presence[i].username == message.username)
+    {
+      presence[i].rssi = message.rssi;
+      presence[i].lastSeenMillis = millis();
+      return;
+    }
+  }
+
+  presence.push_back({message.username, message.rssi, millis()});
 }
 
 void drawSystemBar()
@@ -205,7 +208,7 @@ void drawSystemBar()
   canvasSystemBar->drawString("LoRaChat", sw / 2, sy + sh / 2);
   canvasSystemBar->setTextDatum(middle_left);
   canvasSystemBar->drawString(username, sx + m, sy + sh / 2);
-  draw_rssi_indicator(canvasSystemBar, sw - 60, sy + sh / 2, batteryPct);
+  draw_rssi_indicator(canvasSystemBar, sw - 60, sy + sh / 2, maxRssi);
   draw_battery_indicator(canvasSystemBar, sw - 30, sy + sh / 2, batteryPct);
   canvasSystemBar->pushSprite(sx, sy);
 }
@@ -311,7 +314,7 @@ void drawChatWindow()
       for (int j = lines.size() - 1; j >= 0; j--)
       {
         int cursorY = m + (rowCount - linesDrawn - 1) * (canvas->fontHeight() + m);
-        //canvas->setTextColor(TFT_SILVER);
+        // canvas->setTextColor(TFT_SILVER);
         if (j == 0 && !isOwnMessage)
         {
           int usernameWidth = canvas->fontWidth() * message.username.length();
@@ -328,7 +331,7 @@ void drawChatWindow()
           canvas->setTextColor(TFT_SILVER);
           canvas->drawString(lines[j], cursorX, cursorY);
         }
- 
+
         linesDrawn++;
 
         if (linesDrawn >= rowCount)
@@ -340,33 +343,68 @@ void drawChatWindow()
   }
 }
 
+void drawUserPresenceWindow()
+{
+  int rowCount = (wh - 2 * m) / (canvas->fontHeight() + m) - 1;
+  int colCount = (ww - 2 * m) / canvas->fontWidth() - 1;
+  int linesDrawn = 0;
+  int cursorX = m + 1;
+  int entryOffset = 20;
+
+  canvas->setTextColor(TFT_SILVER);
+  canvas->setTextDatum(top_center);
+  canvas->drawString("Users Seen", ww / 2, 2 * m);
+
+  canvas->setTextDatum(top_left);
+  for (int i = 0; i < presence.size(); i++)
+  {
+    int cursorY = entryOffset + i * (m + canvas->fontHeight() + m);
+    int lastSeenMinutes = (millis() - presence[i].lastSeenMillis) / 1000 / 60;
+    String userPresenceString = String(presence[i].username.c_str()) + " RSSI: " + String(presence[i].rssi) + ", last seen: " + String(lastSeenMinutes) + "m";
+
+    // canvas->drawString(userPresenceString, cursorX, cursorY);
+
+    int usernameWidth = canvas->fontWidth() * presence[i].username.length();
+
+    canvas->setTextColor(UX_COLOR_ACCENT2);
+    canvas->drawString(userPresenceString.substring(0, presence[i].username.length()), cursorX, cursorY);
+    canvas->drawRoundRect(cursorX - 2, cursorY - 2, usernameWidth - 3, canvas->fontHeight() + 4, 2, UX_COLOR_ACCENT);
+
+    canvas->setTextColor(TFT_SILVER);
+    canvas->drawString(userPresenceString.substring(presence[i].username.length()), cursorX + usernameWidth, cursorY);
+
+    linesDrawn++;
+
+    if (linesDrawn >= rowCount)
+    {
+      break;
+    }
+  }
+}
+
 void drawSettingsWindow()
 {
-  canvas->fillSprite(BG_COLOR);
-  canvas->fillRoundRect(0, 0, ww, wh, 3, UX_COLOR_MED);
-  canvas->setTextColor(TFT_SILVER, UX_COLOR_MED);
   canvas->setTextDatum(top_center);
 
   int settingX = ww / 2;
-  int settingOffset = 10;
-  int settingRows[SettingsCount] = {
-      settingOffset + 1 * (m + canvas->fontHeight() + m),
-      settingOffset + 2 * (m + canvas->fontHeight() + m),
-      settingOffset + 3 * (m + canvas->fontHeight() + m),
-      settingOffset + 4 * (m + canvas->fontHeight() + m)};
+  int settingOffset = 25;
 
-  String settingLines[SettingsCount] = {
-      "Username: " + username,
-      "Text Size: " + String(chatTextSize),
-      "Repeat Mode: " + String(repeatMode ? "On" : "Off"),
-      "LoRa Settings: TBD"};
+  String settingLines[SettingsCount];
+  settingLines[Settings::Username] = "Username: " + username;
+  settingLines[Settings::Brightness] = "Brightness: " + String(brightness);
+  settingLines[Settings::TextSize] = "Text Size: TODO"; //+ String(chatTextSize);
+  settingLines[Settings::PingMode] = "Ping Mode: " + String(pingMode ? "On" : "Off");
+  settingLines[Settings::RepeatMode] = "Repeat Mode: " + String(repeatMode ? "On" : "Off");
+  settingLines[Settings::LoRaSettings] = "LoRa Settings: TBD"; 
 
-  canvas->drawString("Settings", settingX, m);
+  canvas->drawString("Settings", settingX, 2 * m);
 
   for (int i = 0; i < SettingsCount; i++)
   {
+    int settingY = settingOffset + i * (m + canvas->fontHeight() + m);
+
     canvas->setTextColor(i == activeSettingIndex ? COLOR_ORANGE : TFT_SILVER);
-    canvas->drawString(settingLines[i], settingX, settingRows[i]);
+    canvas->drawString(settingLines[i], settingX, settingY);
   }
 }
 
@@ -384,8 +422,10 @@ void drawMainWindow()
   case 0:
   case 1:
   case 2:
-  case 3:
     drawChatWindow();
+    break;
+  case 3:
+    drawUserPresenceWindow();
     break;
   case SettingsTabIndex:
     drawSettingsWindow();
@@ -413,16 +453,6 @@ void checkForMenuBoot()
 
     updateFromFS(SD, "/menu.bin");
     ESP.restart();
-  }
-}
-
-void checkForRepeatMode()
-{
-  M5Cardputer.update();
-
-  if (M5Cardputer.Keyboard.isKeyPressed('r'))
-  {
-    repeatMode = true;
   }
 }
 
@@ -518,6 +548,8 @@ bool loraSendMessage(const String &messageText, LoRaMessage &sentMessage, int ch
     sentMessage.text = tabs[activeTabIndex].messageBuffer;
     sentMessage.rssi = 0;
 
+    lastSentMillis = millis();
+
     return true;
   }
   else
@@ -540,11 +572,15 @@ void loraReceiveTask(void *pvParameters)
       LoRaMessage message;
       loraParseFrame(loraFrame.recv_data, loraFrame.recv_data_len, message);
       message.rssi = loraFrame.rssi;
-
       // TODO: check nonce/channel, etc
 
-      tabs[message.channel].messages.push_back(message);
+      recordPresence(message);
       receivedMessage = true;
+
+      if (message.text.isEmpty())
+        continue;
+
+      tabs[message.channel].messages.push_back(message);
 
       if (repeatMode)
       {
@@ -563,6 +599,26 @@ void loraReceiveTask(void *pvParameters)
     }
 
     delay(1);
+  }
+}
+
+void loraPingTask(void *pvParameters)
+{
+  // send out a ping every so often during inactivity to keep presence for other users
+
+  while (1)
+  {
+    if (pingMode && millis() - lastSentMillis > PING_INTERVAL_MS)
+    {
+      LoRaMessage sentMessage;
+      // TODO: for now ping is empty message
+      if (loraSendMessage("", sentMessage, 0))
+      {
+        tabs[activeTabIndex].messages.push_back(sentMessage);
+      }
+    }
+
+    delay(PING_INTERVAL_MS);
   }
 }
 
@@ -633,31 +689,74 @@ void handleChatTabInput(Keyboard_Class::KeysState keyState, Redraw &input)
   }
 }
 
-void handleSettingsTabInput(Keyboard_Class::KeysState keyState, Redraw &input)
+void handleSettingsTabInput(Keyboard_Class::KeysState keyState, Redraw &redraw)
 {
   if (M5Cardputer.Keyboard.isKeyPressed(';'))
   {
     activeSettingIndex = (activeSettingIndex == 0)
                              ? SettingsCount - 1
                              : activeSettingIndex - 1;
-    input = Redraw::Window;
+    redraw = Redraw::Window;
   }
   if (M5Cardputer.Keyboard.isKeyPressed('.'))
   {
     activeSettingIndex = (activeSettingIndex + 1) % SettingsCount;
-    input = Redraw::Window;
+    redraw = Redraw::Window;
   }
 
   switch (activeSettingIndex)
   {
-  case 0:
+  case Settings::Username:
     // dedupe kb input reading into string
 
     // TODO: need to rename all messages from this user, or just user empty for self messages.
     if (updateStringFromInput(keyState, username, MaxUsernameLength, true))
     {
-      input = Redraw::SystemBar;
+      redraw = Redraw::SystemBar;
     }
+    break;
+  case Settings::Brightness:
+    for (auto c : keyState.word)
+    {
+      if (c == ',' || c == '/')
+      {
+        brightness = (c == ',')
+        ? max(0, brightness - 10)
+        : min(100, brightness + 10);
+        M5Cardputer.Display.setBrightness(brightness);
+        redraw = Redraw::Window;
+        break;
+      }
+    }
+    break;
+  case Settings::TextSize:
+    // for (auto c : keyState.word)
+    // {
+    //   if (c == ',' || c == '/')
+    //   {
+    //     chatTextSize = (chatTextSize + 0.5) > 2.0 ? 0.5 : chatTextSize + 0.5;
+    //     input = Redraw::Window;
+    //   }
+    // }
+    // break;
+  case Settings::PingMode:
+    for (auto c : keyState.word)
+    {
+      if (c == ',' || c == '/')
+        pingMode = !pingMode;
+      redraw = Redraw::Window;
+      break;
+    }
+    break;
+  case Settings::RepeatMode:
+    for (auto c : keyState.word)
+    {
+      if (c == ',' || c == '/')
+        repeatMode = !repeatMode;
+      redraw = Redraw::Window;
+      break;
+    }
+    break;
   }
 }
 
@@ -671,31 +770,41 @@ void keyboardInputTask(void *pvParameters)
     M5Cardputer.update();
     if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed())
     {
-      Redraw input = Redraw::None;
+      Redraw redraw = Redraw::None;
       unsigned long currentMillis = millis();
       if (currentMillis - lastKeyPressMillis >= debounceDelay)
       {
+        // need to see again with display off
+        if (brightness <= 0) {
+          brightness = 50;
+          M5Cardputer.Display.setBrightness(brightness);
+          redraw = Redraw::Window;
+        }
+
         lastKeyPressMillis = currentMillis;
         Keyboard_Class::KeysState keyState = M5Cardputer.Keyboard.keysState();
 
         if (activeTabIndex == SettingsTabIndex)
         {
-          handleSettingsTabInput(keyState, input);
+          handleSettingsTabInput(keyState, redraw);
         }
-        // TODO userinfo tab
+        else if (activeTabIndex == UserInfoTabIndex)
+        {
+          // TODO?
+        }
         else
         {
-          handleChatTabInput(keyState, input);
+          handleChatTabInput(keyState, redraw);
         }
 
         if (keyState.tab)
         {
           activeTabIndex = (activeTabIndex + 1) % TabCount;
-          input = Redraw::TabBar;
+          redraw = Redraw::TabBar;
         }
       }
 
-      keyboardInput = input;
+      keyboardInput = redraw;
     }
   }
 }
@@ -710,11 +819,10 @@ void setup()
   USBSerial.println("setup");
 
   checkForMenuBoot();
-  checkForRepeatMode();
 
   M5Cardputer.Display.init();
   M5Cardputer.Display.setRotation(1);
-  M5Cardputer.Display.setBrightness(repeatMode ? 0 : 70);
+  M5Cardputer.Display.setBrightness(brightness);
 
   canvas = new M5Canvas(&M5Cardputer.Display);
   canvas->createSprite(ww, wh);
@@ -738,14 +846,12 @@ void setup()
   loraInit();
 
   xTaskCreateUniversal(loraReceiveTask, "loraReceiveTask", 8192, NULL, 1, NULL, APP_CPU_NUM);
+  xTaskCreateUniversal(loraPingTask, "loraPingTask", 8192, NULL, 1, NULL, APP_CPU_NUM);
   xTaskCreateUniversal(keyboardInputTask, "keyboardInputTask", 8192, NULL, 1, NULL, APP_CPU_NUM);
 }
 
 void loop()
 {
-  // primarily handles drawing state changes from input/receive tasks
-
-  // TODO improve
   switch (keyboardInput)
   {
   case Redraw::None:
@@ -771,14 +877,28 @@ void loop()
     drawMainWindow();
   }
 
-  // redraw occcasionally for battery and bt connection status updates
+  // redraw occcasionally for battery and rssi updates
   if (millis() > updateDelay)
   {
+    bool redraw = false;
     updateDelay = millis() + 2000;
+
     int newBatteryPct = M5Cardputer.Power.getBatteryLevel();
     if (newBatteryPct != batteryPct)
     {
       batteryPct = newBatteryPct;
+      redraw = true;
+    }
+
+    int newRssi = getPresenceRssi();
+    if (newRssi != maxRssi)
+    {
+      maxRssi = newRssi;
+      redraw = true;
+    }
+
+    if (redraw)
+    {
       drawSystemBar();
     }
   }

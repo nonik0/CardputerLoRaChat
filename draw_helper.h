@@ -14,8 +14,15 @@ const unsigned short COLOR_BLUEGRAY = 0x0B0C;
 const unsigned short COLOR_BLUE = 0x026E;
 const unsigned short COLOR_PURPLE = 0x7075;
 
-inline void draw_rssi_indicator(M5Canvas *canvas, int x, int y,
-                                   int rssi)
+// color palette, eventually configurable
+#define BG_COLOR BLACK
+#define UX_COLOR_DARK COLOR_DARKGRAY
+#define UX_COLOR_MED COLOR_MEDGRAY
+#define UX_COLOR_LIGHT COLOR_LIGHTGRAY
+#define UX_COLOR_ACCENT COLOR_ORANGE
+#define UX_COLOR_ACCENT2 YELLOW
+
+inline void draw_rssi_indicator(M5Canvas *canvas, int x, int y, int rssi)
 {
   const uint8_t bar1 = 2, bar2 = 5, bar3 = 8, bar4 = 11;
   const uint8_t barW = 3;
@@ -23,18 +30,29 @@ inline void draw_rssi_indicator(M5Canvas *canvas, int x, int y,
   const uint8_t barSpace = 2;
   //const uint8_t barTotalW = barW * 4 + barSpace * 3;
 
+  // TODO: experiment with RSSI values to determine what is a good range
   uint8_t barX = x;
-  canvas->drawRect(barX, barY + (bar4 - bar1), barW, bar1, TFT_SILVER);
+  (rssi > -160)
+  ? canvas->fillRect(barX, barY + (bar4 - bar1), barW, bar1, UX_COLOR_ACCENT)
+  : canvas->drawRect(barX, barY + (bar4 - bar1), barW, bar1, TFT_SILVER);
+
   barX += barW + barSpace;
-  canvas->drawRect(barX, barY + (bar4 - bar2), barW, bar2, TFT_SILVER);
+  (rssi > -120)
+  ? canvas->fillRect(barX, barY + (bar4 - bar2), barW, bar2, UX_COLOR_ACCENT)
+  : canvas->drawRect(barX, barY + (bar4 - bar2), barW, bar2, TFT_SILVER);
+
   barX += barW + barSpace;
-  canvas->drawRect(barX, barY + (bar4 - bar3), barW, bar3, TFT_SILVER);
+  (rssi > -80)
+  ? canvas->fillRect(barX, barY + (bar4 - bar3), barW, bar3, UX_COLOR_ACCENT)
+  : canvas->drawRect(barX, barY + (bar4 - bar3), barW, bar3, TFT_SILVER);
+
   barX += barW + barSpace;
-  canvas->drawRect(barX, barY + (bar4 - bar4), barW, bar4, TFT_SILVER);
+  (rssi > -40)
+  ? canvas->fillRect(barX, barY + (bar4 - bar4), barW, bar4, UX_COLOR_ACCENT)
+  : canvas->drawRect(barX, barY + (bar4 - bar4), barW, bar4, TFT_SILVER);
 }
 
-inline void draw_battery_indicator(M5Canvas *canvas, int x, int y,
-                                   int batteryPct)
+inline void draw_battery_indicator(M5Canvas *canvas, int x, int y, int batteryPct)
 {
   const int battw = 24;
   const int batth = 11;
