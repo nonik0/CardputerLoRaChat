@@ -77,6 +77,7 @@ enum Settings
   LoRaSettings = 5
 };
 const int SettingsCount = 6;
+const String SettingsNames[SettingsCount] = {"Username", "Brightness", "Text Size", "Ping Mode", "Repeat Mode", "LoRa Module Config"};
 uint8_t activeSettingIndex;
 const uint8_t MinUsernameLength = 2; // TODO
 const uint8_t MaxUsernameLength = 6;
@@ -85,6 +86,7 @@ short brightness = 70;
 float chatTextSize = 1.0; // TODO: S, M, L?
 bool pingMode = true;
 bool repeatMode = false;
+int loraWriteStage = 0;
 
 // display layout constants
 const uint8_t w = 240; // M5Cardputer.Display.width();
@@ -178,24 +180,25 @@ int getPresenceRssi()
     }
   }
 
-  if (maxRssiAllUsers == -1000)
-    USBSerial.println("no presence found");
   return maxRssiAllUsers;
 }
 
-void recordPresence(const LoRaMessage &message)
+bool recordPresence(const LoRaMessage &message)
 {
   for (int i = 0; i < presence.size(); i++)
   {
     if (presence[i].username == message.username)
     {
       presence[i].rssi = message.rssi;
+
+      bool beenAWhile = millis() - presence[i].lastSeenMillis > PRESENCE_TIMEOUT_MS;
       presence[i].lastSeenMillis = millis();
-      return;
+      return beenAWhile;
     }
   }
 
   presence.push_back({message.username, message.rssi, millis()});
+  return true;
 }
 
 void drawSystemBar()
@@ -307,7 +310,7 @@ void drawChatWindow()
       {
         cursorX = m + 1;
         canvas->setTextDatum(top_left);
-        message.text = String(message.username.c_str()) + " " + message.text; // TODO fix this hack?
+        message.text = message.username + message.text;
       }
 
       std::vector<String> lines = getMessageLines(message.text, messageWidth);
@@ -317,7 +320,7 @@ void drawChatWindow()
         // canvas->setTextColor(TFT_SILVER);
         if (j == 0 && !isOwnMessage)
         {
-          int usernameWidth = canvas->fontWidth() * message.username.length();
+          int usernameWidth = canvas->fontWidth() * (message.username.length() + 1);
 
           canvas->setTextColor(UX_COLOR_ACCENT2);
           canvas->drawString(lines[j].substring(0, message.username.length()), cursorX, cursorY);
@@ -353,7 +356,11 @@ void drawUserPresenceWindow()
 
   canvas->setTextColor(TFT_SILVER);
   canvas->setTextDatum(top_center);
-  canvas->drawString("Users Seen", ww / 2, 2 * m);
+  canvas->drawString("Users Seen", ww / 2, 2 * m - 1);
+  for (int i = -1; i <= 1; i++)
+  {
+    canvas->drawLine(10, 3 * m + canvas->fontHeight() + i, ww - 10, 3 * m + canvas->fontHeight() + i, UX_COLOR_DARK);
+  }
 
   canvas->setTextDatum(top_left);
   for (int i = 0; i < presence.size(); i++)
@@ -364,7 +371,7 @@ void drawUserPresenceWindow()
 
     // canvas->drawString(userPresenceString, cursorX, cursorY);
 
-    int usernameWidth = canvas->fontWidth() * presence[i].username.length();
+    int usernameWidth = canvas->fontWidth() * (presence[i].username.length() + 1);
 
     canvas->setTextColor(UX_COLOR_ACCENT2);
     canvas->drawString(userPresenceString.substring(0, presence[i].username.length()), cursorX, cursorY);
@@ -386,25 +393,66 @@ void drawSettingsWindow()
 {
   canvas->setTextDatum(top_center);
 
-  int settingX = ww / 2;
-  int settingOffset = 25;
+  //int settingX = ww / 2;
+  int settingX = m + (SettingsNames[5].length() + 3) * canvas->fontWidth(); // width of longest setting name
+  int settingXGap = 10;
+  int settingYOffset = 25;
 
-  String settingLines[SettingsCount];
-  settingLines[Settings::Username] = "Username: " + username;
-  settingLines[Settings::Brightness] = "Brightness: " + String(brightness);
-  settingLines[Settings::TextSize] = "Text Size: TODO"; //+ String(chatTextSize);
-  settingLines[Settings::PingMode] = "Ping Mode: " + String(pingMode ? "On" : "Off");
-  settingLines[Settings::RepeatMode] = "Repeat Mode: " + String(repeatMode ? "On" : "Off");
-  settingLines[Settings::LoRaSettings] = "LoRa Settings: TBD"; 
+  String loraSetting;
+  int loraSettingColor = 0; // TODO
+  switch (loraWriteStage)
+  {
+  case 0:
+    loraSetting = "Write?";
+    break;
+  case 1:
+    loraSetting = "M0, M1 off?";
+    break;
+  case 2:
+    loraSetting = "OK!";
+    loraSettingColor = TFT_GREEN;
+    break;
+  case 3:
+    loraSetting = "Error!";
+    loraSettingColor = TFT_RED;
+    break;
+  }
 
-  canvas->drawString("Settings", settingX, 2 * m);
+  String settingValues[SettingsCount];
+  settingValues[Settings::Username] = username;
+  settingValues[Settings::Brightness] = String(brightness);
+  settingValues[Settings::TextSize] = "TODO"; //+ String(chatTextSize);
+  settingValues[Settings::PingMode] = String(pingMode ? "On" : "Off");
+  settingValues[Settings::RepeatMode] = String(repeatMode ? "On" : "Off");
+  settingValues[Settings::LoRaSettings] = loraSetting;
+
+  int settingColors[SettingsCount];
+  settingColors[Settings::Username] = username.length() < MinUsernameLength ? TFT_RED : 0;
+  settingColors[Settings::Brightness] = 0;
+  settingColors[Settings::TextSize] = 0;
+  settingColors[Settings::PingMode] = pingMode ? TFT_GREEN : TFT_RED;
+  settingColors[Settings::RepeatMode] = repeatMode ? TFT_GREEN : TFT_RED;
+  settingColors[Settings::LoRaSettings] = loraSettingColor;
+
+  canvas->drawString("Settings", ww / 2, 2 * m - 1);
+
+  for (int i = -1; i <= 1; i++)
+  {
+    canvas->drawLine(10, 3 * m + canvas->fontHeight() + i, ww - 10, 3 * m + canvas->fontHeight() + i, UX_COLOR_DARK);
+  }
 
   for (int i = 0; i < SettingsCount; i++)
   {
-    int settingY = settingOffset + i * (m + canvas->fontHeight() + m);
+    int settingY = settingYOffset + i * (m + canvas->fontHeight() + m);
+    int settingColor = i == activeSettingIndex ? COLOR_ORANGE : TFT_SILVER;
 
-    canvas->setTextColor(i == activeSettingIndex ? COLOR_ORANGE : TFT_SILVER);
-    canvas->drawString(settingLines[i], settingX, settingY);
+    canvas->setTextColor(settingColor);
+    canvas->setTextDatum(top_right);
+    canvas->drawString(SettingsNames[i] + ':', settingX, settingY);
+
+    canvas->setTextDatum(top_left);
+    canvas->setTextColor(settingColors[i] == 0 ? settingColor : settingColors[i]);
+    canvas->drawString(settingValues[i], settingX + settingXGap, settingY);
   }
 }
 
@@ -491,15 +539,16 @@ void loraInit()
   }
 }
 
-void loraCreateFrame(const String &messageText, uint8_t *frameData, size_t &frameDataLength)
+void loraCreateFrame(int channel, const String &messageText, uint8_t *frameData, size_t &frameDataLength)
 {
   // Ensure the data array has enough space
   // if (length < sizeof(message) + strlen(message.text) + 1) {
   //   std::cerr << "Error: Insufficient space to create the message." << std::endl;
   //   return;
   // }
+  USBSerial.printf("creating frame: |%d|%d|%s|%s|\n", loraNonce, channel, username, messageText);
 
-  frameData[0] = (loraNonce & 0x3F) | ((tabs[activeTabIndex].channel & 0x03) << 6);
+  frameData[0] = (loraNonce & 0x3F) | ((channel & 0x03) << 6);
   std::memcpy(frameData + 1, username.c_str(), min(username.length() + 1, (unsigned int)MaxUsernameLength));
   std::memcpy(frameData + MaxUsernameLength + 1, messageText.c_str(), messageText.length() + 1);
   frameDataLength = MaxUsernameLength + messageText.length() + 2;
@@ -512,37 +561,27 @@ void loraParseFrame(const uint8_t *frameData, size_t frameDataLength, LoRaMessag
 
   message.nonce = (frameData[0] & 0x3F);
   message.channel = ((frameData[0] >> 6) & 0x03);
-  message.username = String((const char *)(frameData + 1), MaxUsernameLength);
+  message.username = String((const char *)(frameData + 1), MaxUsernameLength).c_str();
   size_t messageLength = frameDataLength - 7;
-  message.text = String((const char *)(frameData + 7), messageLength - 1);
+  message.text = String((const char *)(frameData + 7), messageLength - 1).c_str();
 
-  // USBSerial.print("username: ");
-  // for (int i = 0; i < MaxUsernameLength; i++)
-  // {
-  //   USBSerial.printf("%02x ", message.username[i]);
-  // }
-  // USBSerial.print("\nmessage: ");
-  // for (int i = 0; i < messageLength; i++)
-  // {
-  //   USBSerial.printf("%02x ", message.text[i]);
-  // }
-  // USBSerial.println();
-  USBSerial.printf("|%d|%d|%s|%s|\n", message.nonce, message.channel, message.username, message.text.c_str());
+  USBSerial.printf("parsed frame: |%d|%d|%s|%s|\n", message.nonce, message.channel, message.username, message.text.c_str());
 }
 
-bool loraSendMessage(const String &messageText, LoRaMessage &sentMessage, int channel = -1)
+bool loraSendMessage(int channel, const String &messageText, LoRaMessage &sentMessage)
 {
   uint8_t frameData[201]; // TODO: correct max size
   size_t frameDataLength;
-  loraCreateFrame(messageText, frameData, frameDataLength);
+  loraCreateFrame(channel, messageText, frameData, frameDataLength);
 
-  USBSerial.print("sending frame: ");
+  USBSerial.print("sending frame:");
   printHexDump(frameData, frameDataLength);
 
   if (lora.SendFrame(loraConfig, frameData, frameDataLength) == 0)
   {
-    USBSerial.println("sent!");
-    sentMessage.channel = channel < 0 ? tabs[activeTabIndex].channel : channel;
+    USBSerial.println();
+
+    sentMessage.channel = channel;
     sentMessage.nonce = loraNonce++;
     sentMessage.username = "";
     sentMessage.text = tabs[activeTabIndex].messageBuffer;
@@ -572,9 +611,15 @@ void loraReceiveTask(void *pvParameters)
       LoRaMessage message;
       loraParseFrame(loraFrame.recv_data, loraFrame.recv_data_len, message);
       message.rssi = loraFrame.rssi;
-      // TODO: check nonce/channel, etc
 
-      recordPresence(message);
+      // TODO: check nonce, replay for basic meshing
+
+      // send an immediate ping to announce self if new presence (new user or been a while for existing one)
+      if (recordPresence(message) && !repeatMode)
+      {
+        LoRaMessage sentMessage;
+        loraSendMessage(0b11, "", sentMessage);
+      }
       receivedMessage = true;
 
       if (message.text.isEmpty())
@@ -586,11 +631,10 @@ void loraReceiveTask(void *pvParameters)
       {
         String response = String("name: " + String(message.username) + ", msg: " + String(message.text) + ", rssi: " + String(loraFrame.rssi));
         LoRaMessage sentMessage;
-        if (loraSendMessage(response, sentMessage, message.channel))
+        if (loraSendMessage(message.channel, response, sentMessage))
         {
           tabs[activeTabIndex].messages.push_back(sentMessage);
         }
-        // TODO:
       }
     }
     else
@@ -605,17 +649,15 @@ void loraReceiveTask(void *pvParameters)
 void loraPingTask(void *pvParameters)
 {
   // send out a ping every so often during inactivity to keep presence for other users
+  LoRaMessage sentMessage;
+  loraSendMessage(0b11, "", sentMessage);
 
   while (1)
   {
+    // TODO: additional conditions to send right after new user seen, etc.
     if (pingMode && millis() - lastSentMillis > PING_INTERVAL_MS)
     {
-      LoRaMessage sentMessage;
-      // TODO: for now ping is empty message
-      if (loraSendMessage("", sentMessage, 0))
-      {
-        tabs[activeTabIndex].messages.push_back(sentMessage);
-      }
+      loraSendMessage(0b11, "", sentMessage);
     }
 
     delay(PING_INTERVAL_MS);
@@ -635,7 +677,7 @@ bool updateStringFromInput(Keyboard_Class::KeysState keyState, String &str, int 
     }
     else
     {
-      USBSerial.printf("max length reached\n");
+      USBSerial.printf("max length reached: [%s]\n + %c", str.c_str(), i);
     }
   }
 
@@ -654,18 +696,6 @@ void handleChatTabInput(Keyboard_Class::KeysState keyState, Redraw &input)
   {
     input = Redraw::Window;
   }
-  // for (auto i : keyState.word)
-  // {
-  //   // TODO: max length
-  //   tabs[activeTabIndex].messageBuffer += i;
-  //   input = Redraw::Window;
-  // }
-
-  // if (keyState.del && tabs[activeTabIndex].messageBuffer.length() > 0)
-  // {
-  //   tabs[activeTabIndex].messageBuffer.remove(tabs[activeTabIndex].messageBuffer.length() - 1);
-  //   input = Redraw::Window;
-  // }
 
   if (keyState.enter)
   {
@@ -673,8 +703,14 @@ void handleChatTabInput(Keyboard_Class::KeysState keyState, Redraw &input)
 
     tabs[activeTabIndex].messageBuffer.trim();
 
+    // empty message reserved for pings
+    if (tabs[activeTabIndex].messageBuffer.isEmpty())
+    {
+      return;
+    }
+
     LoRaMessage sentMessage;
-    if (loraSendMessage(tabs[activeTabIndex].messageBuffer, sentMessage))
+    if (loraSendMessage(activeTabIndex, tabs[activeTabIndex].messageBuffer, sentMessage))
     {
       tabs[activeTabIndex].messages.push_back(sentMessage);
     }
@@ -707,9 +743,6 @@ void handleSettingsTabInput(Keyboard_Class::KeysState keyState, Redraw &redraw)
   switch (activeSettingIndex)
   {
   case Settings::Username:
-    // dedupe kb input reading into string
-
-    // TODO: need to rename all messages from this user, or just user empty for self messages.
     if (updateStringFromInput(keyState, username, MaxUsernameLength, true))
     {
       redraw = Redraw::SystemBar;
@@ -721,8 +754,8 @@ void handleSettingsTabInput(Keyboard_Class::KeysState keyState, Redraw &redraw)
       if (c == ',' || c == '/')
       {
         brightness = (c == ',')
-        ? max(0, brightness - 10)
-        : min(100, brightness + 10);
+                         ? max(0, brightness - 10)
+                         : min(100, brightness + 10);
         M5Cardputer.Display.setBrightness(brightness);
         redraw = Redraw::Window;
         break;
@@ -743,26 +776,69 @@ void handleSettingsTabInput(Keyboard_Class::KeysState keyState, Redraw &redraw)
     for (auto c : keyState.word)
     {
       if (c == ',' || c == '/')
+      {
         pingMode = !pingMode;
+        redraw = Redraw::Window;
+      }
+    }
+    if (keyState.enter)
+    {
+      pingMode = !pingMode;
       redraw = Redraw::Window;
-      break;
     }
     break;
   case Settings::RepeatMode:
     for (auto c : keyState.word)
     {
       if (c == ',' || c == '/')
+      {
         repeatMode = !repeatMode;
-      redraw = Redraw::Window;
+        redraw = Redraw::Window;
+      }
       break;
     }
+    if (keyState.enter)
+    {
+      repeatMode = !repeatMode;
+      redraw = Redraw::Window;
+    }
     break;
+  case Settings::LoRaSettings:
+    if (keyState.enter)
+    {
+      switch (loraWriteStage)
+      {
+      case 0:
+        // show switch reminder
+        loraWriteStage++;
+        break;
+      case 1:
+        // try to write
+        // debug
+        loraWriteStage = (lora.InitLoRaSetting(loraConfig) == 0)
+                             ? loraWriteStage + 1
+                             : loraWriteStage + 2;
+        break;
+      default:
+        loraWriteStage = 0;
+        break;
+      }
+
+      redraw = Redraw::Window;
+    }
+    break;
+  }
+
+  // reset lora write stage if unselected
+  if (activeSettingIndex != Settings::LoRaSettings)
+  {
+    loraWriteStage = 0;
   }
 }
 
 void keyboardInputTask(void *pvParameters)
 {
-  const unsigned long debounceDelay = 100;
+  const unsigned long debounceDelay = 200;
   unsigned long lastKeyPressMillis = 0;
 
   while (1)
@@ -775,7 +851,8 @@ void keyboardInputTask(void *pvParameters)
       if (currentMillis - lastKeyPressMillis >= debounceDelay)
       {
         // need to see again with display off
-        if (brightness <= 0) {
+        if (brightness <= 0)
+        {
           brightness = 50;
           M5Cardputer.Display.setBrightness(brightness);
           redraw = Redraw::Window;

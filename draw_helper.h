@@ -28,26 +28,24 @@ inline void draw_rssi_indicator(M5Canvas *canvas, int x, int y, int rssi)
   const uint8_t barW = 3;
   const uint8_t barY = y - bar4 / 2;
   const uint8_t barSpace = 2;
-  //const uint8_t barTotalW = barW * 4 + barSpace * 3;
 
-  // TODO: experiment with RSSI values to determine what is a good range
   uint8_t barX = x;
-  (rssi > -160)
+  (rssi > -120)
   ? canvas->fillRect(barX, barY + (bar4 - bar1), barW, bar1, UX_COLOR_ACCENT)
   : canvas->drawRect(barX, barY + (bar4 - bar1), barW, bar1, TFT_SILVER);
 
   barX += barW + barSpace;
-  (rssi > -120)
+  (rssi > -90)
   ? canvas->fillRect(barX, barY + (bar4 - bar2), barW, bar2, UX_COLOR_ACCENT)
   : canvas->drawRect(barX, barY + (bar4 - bar2), barW, bar2, TFT_SILVER);
 
   barX += barW + barSpace;
-  (rssi > -80)
+  (rssi > -60)
   ? canvas->fillRect(barX, barY + (bar4 - bar3), barW, bar3, UX_COLOR_ACCENT)
   : canvas->drawRect(barX, barY + (bar4 - bar3), barW, bar3, TFT_SILVER);
 
   barX += barW + barSpace;
-  (rssi > -40)
+  (rssi > -30)
   ? canvas->fillRect(barX, barY + (bar4 - bar4), barW, bar4, UX_COLOR_ACCENT)
   : canvas->drawRect(barX, barY + (bar4 - bar4), barW, bar4, TFT_SILVER);
 }
