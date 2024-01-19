@@ -49,15 +49,20 @@ struct Tab
 LoRa_E220_JP lora;
 struct LoRaConfigItem_t loraConfig;
 struct RecvFrame_t loraFrame;
-uint8_t loraNonce = 0; // todo: save??
-unsigned long lastSentMillis = 0;
-volatile bool receivedMessage = false; // signal to redraw window
+uint8_t loraNonce = 0;
 
 // TODO: extract drawing functionality to class?
 M5Canvas *canvas;
 M5Canvas *canvasSystemBar;
 M5Canvas *canvasTabBar;
+
+// used by draw loop to trigger redraws
 volatile Redraw keyboardInput = Redraw::None; // tracks what to redraw with kb input
+volatile bool receivedMessage = false; // signal to redraw window
+volatile int updateDelay = 0;
+volatile unsigned long lastRx = false;
+volatile unsigned long lastTx = false;
+const int RxTxShowDelay = 1000; // ms
 
 // tab state
 uint8_t activeTabIndex;
@@ -111,7 +116,6 @@ const uint8_t wh = h - wy - m;
 // track state of system bar elements for redraws
 uint8_t batteryPct = M5Cardputer.Power.getBatteryLevel();
 int maxRssi = -1000;
-int updateDelay = 0;
 
 void printHexDump(const void *data, size_t size)
 {
@@ -211,6 +215,10 @@ void drawSystemBar()
   canvasSystemBar->drawString("LoRaChat", sw / 2, sy + sh / 2);
   canvasSystemBar->setTextDatum(middle_left);
   canvasSystemBar->drawString(username, sx + m, sy + sh / 2);
+  if (millis() - lastTx < RxTxShowDelay)
+    canvasSystemBar->drawString("TX", sw - 85, sy + sh / 2);
+  if (millis() - lastRx < RxTxShowDelay)
+    canvasSystemBar->drawString("RX", sw - 75, sy + sh / 2);
   draw_rssi_indicator(canvasSystemBar, sw - 60, sy + sh / 2, maxRssi);
   draw_battery_indicator(canvasSystemBar, sw - 30, sy + sh / 2, batteryPct);
   canvasSystemBar->pushSprite(sx, sy);
@@ -280,7 +288,7 @@ void drawChatWindow()
   // draw message buffer
   for (int i = -1; i <= 1; i++)
   {
-    canvas->drawLine(0, messageBufferY + i, ww, messageBufferY + i, UX_COLOR_DARK);
+    canvas->drawLine(10, messageBufferY + i, ww - 10, messageBufferY + i, UX_COLOR_LIGHT);
   }
   if (tabs[activeTabIndex].messageBuffer.length() > 0)
   {
@@ -352,25 +360,33 @@ void drawUserPresenceWindow()
   int colCount = (ww - 2 * m) / canvas->fontWidth() - 1;
   int linesDrawn = 0;
   int cursorX = m + 1;
-  int entryOffset = 20;
+  int entryYOffset = 25;
 
   canvas->setTextColor(TFT_SILVER);
   canvas->setTextDatum(top_center);
   canvas->drawString("Users Seen", ww / 2, 2 * m - 1);
   for (int i = -1; i <= 1; i++)
   {
-    canvas->drawLine(10, 3 * m + canvas->fontHeight() + i, ww - 10, 3 * m + canvas->fontHeight() + i, UX_COLOR_DARK);
+    canvas->drawLine(10, 3 * m + canvas->fontHeight() + i, ww - 10, 3 * m + canvas->fontHeight() + i, UX_COLOR_LIGHT);
   }
 
   canvas->setTextDatum(top_left);
   for (int i = 0; i < presence.size(); i++)
   {
-    int cursorY = entryOffset + i * (m + canvas->fontHeight() + m);
-    int lastSeenMinutes = (millis() - presence[i].lastSeenMillis) / 1000 / 60;
-    String userPresenceString = String(presence[i].username.c_str()) + " RSSI: " + String(presence[i].rssi) + ", last seen: " + String(lastSeenMinutes) + "m";
+    int cursorY = entryYOffset + i * (m + canvas->fontHeight() + m);
+    int lastSeenSecs = (millis() - presence[i].lastSeenMillis) / 1000;
 
-    // canvas->drawString(userPresenceString, cursorX, cursorY);
+    String lastSeenString = String(lastSeenSecs) + "s"; // show seconds by default
+    if (lastSeenSecs > 60 * 60 * 3)                     // show hours after 3h
+    {
+      lastSeenString = String(lastSeenSecs / (60 * 60)) + "h";
+    }
+    else if (lastSeenSecs > PRESENCE_TIMEOUT_MS / 1000) // show minutes after 5m
+    {
+      lastSeenString = String(lastSeenSecs / 60) + "m";
+    }
 
+    String userPresenceString = String(presence[i].username.c_str()) + " RSSI: " + String(presence[i].rssi) + ", last seen: " + lastSeenString;
     int usernameWidth = canvas->fontWidth() * (presence[i].username.length() + 1);
 
     canvas->setTextColor(UX_COLOR_ACCENT2);
@@ -393,13 +409,13 @@ void drawSettingsWindow()
 {
   canvas->setTextDatum(top_center);
 
-  //int settingX = ww / 2;
+  // int settingX = ww / 2;
   int settingX = m + (SettingsNames[5].length() + 3) * canvas->fontWidth(); // width of longest setting name
   int settingXGap = 10;
   int settingYOffset = 25;
 
   String loraSetting;
-  int loraSettingColor = 0; // TODO
+  int loraSettingColor = 0;
   switch (loraWriteStage)
   {
   case 0:
@@ -421,13 +437,13 @@ void drawSettingsWindow()
   String settingValues[SettingsCount];
   settingValues[Settings::Username] = username;
   settingValues[Settings::Brightness] = String(brightness);
-  settingValues[Settings::TextSize] = "TODO"; //+ String(chatTextSize);
+  settingValues[Settings::TextSize] = String(chatTextSize);
   settingValues[Settings::PingMode] = String(pingMode ? "On" : "Off");
   settingValues[Settings::RepeatMode] = String(repeatMode ? "On" : "Off");
   settingValues[Settings::LoRaSettings] = loraSetting;
 
   int settingColors[SettingsCount];
-  settingColors[Settings::Username] = username.length() < MinUsernameLength ? TFT_RED : 0;
+  settingColors[Settings::Username] = username.length() < MinUsernameLength ? TFT_RED : (activeSettingIndex == Settings::Username ? TFT_GREEN : 0);
   settingColors[Settings::Brightness] = 0;
   settingColors[Settings::TextSize] = 0;
   settingColors[Settings::PingMode] = pingMode ? TFT_GREEN : TFT_RED;
@@ -438,7 +454,7 @@ void drawSettingsWindow()
 
   for (int i = -1; i <= 1; i++)
   {
-    canvas->drawLine(10, 3 * m + canvas->fontHeight() + i, ww - 10, 3 * m + canvas->fontHeight() + i, UX_COLOR_DARK);
+    canvas->drawLine(10, 3 * m + canvas->fontHeight() + i, ww - 10, 3 * m + canvas->fontHeight() + i, UX_COLOR_LIGHT);
   }
 
   for (int i = 0; i < SettingsCount; i++)
@@ -587,7 +603,8 @@ bool loraSendMessage(int channel, const String &messageText, LoRaMessage &sentMe
     sentMessage.text = tabs[activeTabIndex].messageBuffer;
     sentMessage.rssi = 0;
 
-    lastSentMillis = millis();
+    lastTx = millis();
+    updateDelay = 0;
 
     return true;
   }
@@ -611,6 +628,9 @@ void loraReceiveTask(void *pvParameters)
       LoRaMessage message;
       loraParseFrame(loraFrame.recv_data, loraFrame.recv_data_len, message);
       message.rssi = loraFrame.rssi;
+      receivedMessage = true;
+      lastRx = millis();
+      updateDelay = 0;
 
       // TODO: check nonce, replay for basic meshing
 
@@ -620,7 +640,6 @@ void loraReceiveTask(void *pvParameters)
         LoRaMessage sentMessage;
         loraSendMessage(0b11, "", sentMessage);
       }
-      receivedMessage = true;
 
       if (message.text.isEmpty())
         continue;
@@ -654,8 +673,7 @@ void loraPingTask(void *pvParameters)
 
   while (1)
   {
-    // TODO: additional conditions to send right after new user seen, etc.
-    if (pingMode && millis() - lastSentMillis > PING_INTERVAL_MS)
+    if (pingMode && millis() - lastTx > PING_INTERVAL_MS)
     {
       loraSendMessage(0b11, "", sentMessage);
     }
@@ -851,7 +869,7 @@ void keyboardInputTask(void *pvParameters)
       if (currentMillis - lastKeyPressMillis >= debounceDelay)
       {
         // need to see again with display off
-        if (brightness <= 0)
+        if (brightness <= 30 && !M5Cardputer.Keyboard.isKeyPressed(','))
         {
           brightness = 50;
           M5Cardputer.Display.setBrightness(brightness);
@@ -877,6 +895,7 @@ void keyboardInputTask(void *pvParameters)
         if (keyState.tab)
         {
           activeTabIndex = (activeTabIndex + 1) % TabCount;
+          updateDelay = 0;
           redraw = Redraw::TabBar;
         }
       }
@@ -927,6 +946,7 @@ void setup()
   xTaskCreateUniversal(keyboardInputTask, "keyboardInputTask", 8192, NULL, 1, NULL, APP_CPU_NUM);
 }
 
+// TODO cleanup redraw code
 void loop()
 {
   switch (keyboardInput)
@@ -958,7 +978,7 @@ void loop()
   if (millis() > updateDelay)
   {
     bool redraw = false;
-    updateDelay = millis() + 2000;
+    updateDelay = millis() + 5000;
 
     int newBatteryPct = M5Cardputer.Power.getBatteryLevel();
     if (newBatteryPct != batteryPct)
@@ -974,11 +994,24 @@ void loop()
       redraw = true;
     }
 
+    if (millis() - lastRx < RxTxShowDelay*2 || millis() - lastTx < RxTxShowDelay*2)
+    {
+      updateDelay = millis() + RxTxShowDelay / 2;
+      redraw = true;
+    }
+
     if (redraw)
     {
       drawSystemBar();
     }
+
+    // redraw every second to update last seen times
+    if (activeTabIndex == UserInfoTabIndex)
+    {
+      updateDelay = millis() + 1000;
+      drawMainWindow();
+    }
   }
 
-  delay(100);
+  delay(10);
 }
