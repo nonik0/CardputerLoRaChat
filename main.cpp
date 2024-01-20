@@ -51,7 +51,6 @@ struct LoRaConfigItem_t loraConfig;
 struct RecvFrame_t loraFrame;
 uint8_t loraNonce = 0;
 
-// TODO: extract drawing functionality to class?
 M5Canvas *canvas;
 M5Canvas *canvasSystemBar;
 M5Canvas *canvasTabBar;
@@ -69,7 +68,7 @@ uint8_t activeTabIndex;
 const uint8_t UserInfoTabIndex = 3;
 const uint8_t SettingsTabIndex = 4;
 const uint8_t TabCount = 5;
-Tab tabs[TabCount];
+Tab tabs[TabCount]; // TODO only need for chat tabs
 
 // settings
 enum Settings
@@ -86,7 +85,7 @@ const String SettingsNames[SettingsCount] = {"Username", "Brightness", "Text Siz
 uint8_t activeSettingIndex;
 const uint8_t MinUsernameLength = 2; // TODO
 const uint8_t MaxUsernameLength = 6;
-String username = "nick";
+String username = "anoncy";
 short brightness = 70;
 float chatTextSize = 1.0; // TODO: S, M, L?
 bool pingMode = true;
@@ -474,8 +473,6 @@ void drawSettingsWindow()
 
 void drawMainWindow()
 {
-  // TODO: avoid complete redraw each time by scrolling text if possible?
-
   canvas->fillSprite(BG_COLOR);
   canvas->fillRoundRect(0, 0, ww, wh, 3, UX_COLOR_MED);
   canvas->setTextColor(TFT_SILVER, UX_COLOR_MED);
@@ -518,6 +515,68 @@ void checkForMenuBoot()
     updateFromFS(SD, "/menu.bin");
     ESP.restart();
   }
+}
+
+void checkForConfigFile()
+{
+  M5Cardputer.update();
+
+  uint8_t retries = 3;
+  SPI2.begin(M5.getPin(m5::pin_name_t::sd_spi_sclk),
+             M5.getPin(m5::pin_name_t::sd_spi_miso),
+             M5.getPin(m5::pin_name_t::sd_spi_mosi),
+             M5.getPin(m5::pin_name_t::sd_spi_ss));
+  while (!SD.begin(M5.getPin(m5::pin_name_t::sd_spi_ss), SPI2) && retries-- > 0)
+  {
+    delay(100);
+  }
+
+  if (retries == 0)
+  {
+    return;
+  }
+
+  File configFile = SD.open("/LoRaChat.conf");
+  if (!configFile)
+    return;
+
+  USBSerial.println("reading config file: LoRaChat.conf");
+
+  while (configFile.available())
+  {
+    String line = configFile.readStringUntil('\n');
+    String name = line.substring(0, line.indexOf('='));
+    String value = line.substring(line.indexOf('=') + 1);
+
+    name.trim();
+    name.toLowerCase();
+    value.trim();
+    value.toLowerCase();
+
+    if (name == "username")
+    {
+      username = value.substring(0, MaxUsernameLength);
+      USBSerial.println("username: " + username);
+    }
+    else if (name == "brightness")
+    {
+      brightness = value.toInt();
+      USBSerial.println("brightness: " + String(brightness));
+    }
+    else if (name == "pingmode")
+    {
+      pingMode = (value == "true" || value == "1" || value == "on");
+      USBSerial.println("pingMode: " + String(pingMode));
+    }
+    else if (name == "repeatmode")
+    {
+      repeatMode = (value == "true" || value == "1" || value == "on");
+      USBSerial.println("repeatMode: " + String(repeatMode));
+    }
+  }
+
+  configFile.close();
+  SD.end();
 }
 
 void loraInit()
@@ -885,7 +944,7 @@ void keyboardInputTask(void *pvParameters)
         }
         else if (activeTabIndex == UserInfoTabIndex)
         {
-          // TODO?
+          // TODO? what sort of input would be useful here?
         }
         else
         {
@@ -915,6 +974,7 @@ void setup()
   USBSerial.println("setup");
 
   checkForMenuBoot();
+  checkForConfigFile();
 
   M5Cardputer.Display.init();
   M5Cardputer.Display.setRotation(1);
