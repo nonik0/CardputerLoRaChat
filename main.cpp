@@ -9,12 +9,12 @@
 #define PING_INTERVAL_MS 1000 * 60        // 1 minute
 #define PRESENCE_TIMEOUT_MS 1000 * 60 * 5 // 5 minutes, the time before a msg "expires" for the purposes of tracking a user presence
 
-enum Redraw
+enum RedrawFlags
 {
-  Window,
-  SystemBar,
-  TabBar,
-  None
+  MainWindow = 0b001,
+  SystemBar = 0b010,
+  TabBar = 0b100,
+  None = 0b000
 };
 
 // TODO: refine message format
@@ -57,7 +57,7 @@ M5Canvas *canvasSystemBar;
 M5Canvas *canvasTabBar;
 
 // used by draw loop to trigger redraws
-volatile Redraw keyboardInput = Redraw::None; // tracks what to redraw with kb input
+volatile uint8_t keyboardRedrawFlags = RedrawFlags::None;
 volatile bool receivedMessage = false; // signal to redraw window
 volatile int updateDelay = 0;
 volatile unsigned long lastRx = false;
@@ -216,9 +216,9 @@ void drawSystemBar()
   canvasSystemBar->setTextDatum(middle_left);
   canvasSystemBar->drawString(username, sx + m, sy + sh / 2);
   if (millis() - lastTx < RxTxShowDelay)
-    canvasSystemBar->drawString("TX", sw - 85, sy + sh / 2);
+    draw_tx_indicator(canvasSystemBar, sw - 71, sy + 1 * (sh / 3));
   if (millis() - lastRx < RxTxShowDelay)
-    canvasSystemBar->drawString("RX", sw - 75, sy + sh / 2);
+    draw_rx_indicator(canvasSystemBar, sw - 71, sy + 2 * (sh / 3));
   draw_rssi_indicator(canvasSystemBar, sw - 60, sy + sh / 2, maxRssi);
   draw_battery_indicator(canvasSystemBar, sw - 30, sy + sh / 2, batteryPct);
   canvasSystemBar->pushSprite(sx, sy);
@@ -678,7 +678,7 @@ void loraPingTask(void *pvParameters)
       loraSendMessage(0b11, "", sentMessage);
     }
 
-    delay(PING_INTERVAL_MS);
+    delay(1000);
   }
 }
 
@@ -708,11 +708,11 @@ bool updateStringFromInput(Keyboard_Class::KeysState keyState, String &str, int 
   return updated;
 }
 
-void handleChatTabInput(Keyboard_Class::KeysState keyState, Redraw &input)
+void handleChatTabInput(Keyboard_Class::KeysState keyState, uint8_t &redrawFlags)
 {
   if (updateStringFromInput(keyState, tabs[activeTabIndex].messageBuffer))
   {
-    input = Redraw::Window;
+    redrawFlags |= RedrawFlags::MainWindow;
   }
 
   if (keyState.enter)
@@ -739,23 +739,23 @@ void handleChatTabInput(Keyboard_Class::KeysState keyState, Redraw &input)
     }
 
     tabs[activeTabIndex].messageBuffer.clear();
-    input = Redraw::Window;
+    redrawFlags |= RedrawFlags::MainWindow;
   }
 }
 
-void handleSettingsTabInput(Keyboard_Class::KeysState keyState, Redraw &redraw)
+void handleSettingsTabInput(Keyboard_Class::KeysState keyState, uint8_t &redrawFlags)
 {
   if (M5Cardputer.Keyboard.isKeyPressed(';'))
   {
     activeSettingIndex = (activeSettingIndex == 0)
                              ? SettingsCount - 1
                              : activeSettingIndex - 1;
-    redraw = Redraw::Window;
+    redrawFlags |= RedrawFlags::MainWindow;
   }
   if (M5Cardputer.Keyboard.isKeyPressed('.'))
   {
     activeSettingIndex = (activeSettingIndex + 1) % SettingsCount;
-    redraw = Redraw::Window;
+    redrawFlags |= RedrawFlags::MainWindow;
   }
 
   switch (activeSettingIndex)
@@ -763,7 +763,7 @@ void handleSettingsTabInput(Keyboard_Class::KeysState keyState, Redraw &redraw)
   case Settings::Username:
     if (updateStringFromInput(keyState, username, MaxUsernameLength, true))
     {
-      redraw = Redraw::SystemBar;
+      redrawFlags |= RedrawFlags::SystemBar | RedrawFlags::MainWindow;
     }
     break;
   case Settings::Brightness:
@@ -775,7 +775,7 @@ void handleSettingsTabInput(Keyboard_Class::KeysState keyState, Redraw &redraw)
                          ? max(0, brightness - 10)
                          : min(100, brightness + 10);
         M5Cardputer.Display.setBrightness(brightness);
-        redraw = Redraw::Window;
+        redrawFlags |= RedrawFlags::MainWindow;
         break;
       }
     }
@@ -796,13 +796,13 @@ void handleSettingsTabInput(Keyboard_Class::KeysState keyState, Redraw &redraw)
       if (c == ',' || c == '/')
       {
         pingMode = !pingMode;
-        redraw = Redraw::Window;
+        redrawFlags |= RedrawFlags::MainWindow;
       }
     }
     if (keyState.enter)
     {
       pingMode = !pingMode;
-      redraw = Redraw::Window;
+      redrawFlags |= RedrawFlags::MainWindow;
     }
     break;
   case Settings::RepeatMode:
@@ -811,14 +811,14 @@ void handleSettingsTabInput(Keyboard_Class::KeysState keyState, Redraw &redraw)
       if (c == ',' || c == '/')
       {
         repeatMode = !repeatMode;
-        redraw = Redraw::Window;
+        redrawFlags |= RedrawFlags::MainWindow;
       }
       break;
     }
     if (keyState.enter)
     {
       repeatMode = !repeatMode;
-      redraw = Redraw::Window;
+      redrawFlags |= RedrawFlags::MainWindow;
     }
     break;
   case Settings::LoRaSettings:
@@ -842,7 +842,7 @@ void handleSettingsTabInput(Keyboard_Class::KeysState keyState, Redraw &redraw)
         break;
       }
 
-      redraw = Redraw::Window;
+      redrawFlags |= RedrawFlags::MainWindow;
     }
     break;
   }
@@ -864,7 +864,7 @@ void keyboardInputTask(void *pvParameters)
     M5Cardputer.update();
     if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed())
     {
-      Redraw redraw = Redraw::None;
+      uint8_t redrawFlags = RedrawFlags::None;
       unsigned long currentMillis = millis();
       if (currentMillis - lastKeyPressMillis >= debounceDelay)
       {
@@ -873,7 +873,7 @@ void keyboardInputTask(void *pvParameters)
         {
           brightness = 50;
           M5Cardputer.Display.setBrightness(brightness);
-          redraw = Redraw::Window;
+          redrawFlags |= RedrawFlags::MainWindow;
         }
 
         lastKeyPressMillis = currentMillis;
@@ -881,7 +881,7 @@ void keyboardInputTask(void *pvParameters)
 
         if (activeTabIndex == SettingsTabIndex)
         {
-          handleSettingsTabInput(keyState, redraw);
+          handleSettingsTabInput(keyState, redrawFlags);
         }
         else if (activeTabIndex == UserInfoTabIndex)
         {
@@ -889,18 +889,18 @@ void keyboardInputTask(void *pvParameters)
         }
         else
         {
-          handleChatTabInput(keyState, redraw);
+          handleChatTabInput(keyState, redrawFlags);
         }
 
         if (keyState.tab)
         {
           activeTabIndex = (activeTabIndex + 1) % TabCount;
           updateDelay = 0;
-          redraw = Redraw::TabBar;
+          redrawFlags |= RedrawFlags::TabBar | RedrawFlags::MainWindow;
         }
       }
 
-      keyboardInput = redraw;
+      keyboardRedrawFlags = redrawFlags;
     }
   }
 }
@@ -946,35 +946,23 @@ void setup()
   xTaskCreateUniversal(keyboardInputTask, "keyboardInputTask", 8192, NULL, 1, NULL, APP_CPU_NUM);
 }
 
-// TODO cleanup redraw code
 void loop()
 {
-  switch (keyboardInput)
+  uint8_t redrawFlags = RedrawFlags::None;
+
+  if (keyboardRedrawFlags)
   {
-  case Redraw::None:
-    break;
-  case Redraw::Window:
-    drawMainWindow();
-    keyboardInput = Redraw::None;
-    break;
-  case Redraw::TabBar:
-    drawTabBar();
-    drawMainWindow();
-    keyboardInput = Redraw::None;
-  case Redraw::SystemBar:
-    drawSystemBar();
-    drawMainWindow();
-    keyboardInput = Redraw::None;
-    break;
+    redrawFlags |= keyboardRedrawFlags;
+    keyboardRedrawFlags = RedrawFlags::None;
   }
 
   if (receivedMessage)
   {
+    redrawFlags |= RedrawFlags::MainWindow;
     receivedMessage = false;
-    drawMainWindow();
   }
 
-  // redraw occcasionally for battery and rssi updates
+  // redraw occasionally for system bar updates and user info tab
   if (millis() > updateDelay)
   {
     bool redraw = false;
@@ -984,34 +972,36 @@ void loop()
     if (newBatteryPct != batteryPct)
     {
       batteryPct = newBatteryPct;
-      redraw = true;
+      redrawFlags |= RedrawFlags::SystemBar;
     }
 
     int newRssi = getPresenceRssi();
     if (newRssi != maxRssi)
     {
       maxRssi = newRssi;
-      redraw = true;
+      redrawFlags |= RedrawFlags::SystemBar;
     }
 
-    if (millis() - lastRx < RxTxShowDelay*2 || millis() - lastTx < RxTxShowDelay*2)
+    if (millis() - lastRx < RxTxShowDelay * 2 || millis() - lastTx < RxTxShowDelay * 2)
     {
       updateDelay = millis() + RxTxShowDelay / 2;
-      redraw = true;
-    }
-
-    if (redraw)
-    {
-      drawSystemBar();
+      redrawFlags |= RedrawFlags::SystemBar;
     }
 
     // redraw every second to update last seen times
     if (activeTabIndex == UserInfoTabIndex)
     {
       updateDelay = millis() + 1000;
-      drawMainWindow();
+      redrawFlags |= RedrawFlags::MainWindow;
     }
   }
+
+  if (redrawFlags & RedrawFlags::TabBar)
+    drawTabBar();
+  if (redrawFlags & RedrawFlags::SystemBar)
+    drawSystemBar();
+  if (redrawFlags & RedrawFlags::MainWindow)
+    drawMainWindow();
 
   delay(10);
 }

@@ -22,6 +22,26 @@ const unsigned short COLOR_PURPLE = 0x7075;
 #define UX_COLOR_ACCENT COLOR_ORANGE
 #define UX_COLOR_ACCENT2 YELLOW
 
+inline void draw_tx_indicator(M5Canvas *canvas, int x, int y) {
+  const int txw = 10;
+  const int txa = 3;
+  int txx = x - txw / 2;
+
+  canvas->drawLine(txx, y, txx + txw, y, TFT_SILVER);
+  canvas->drawLine(txx, y, txx + txa, y - txa + 1, TFT_SILVER);
+  canvas->drawLine(txx, y, txx + txa, y + txa - 1, TFT_SILVER);
+}
+
+inline void draw_rx_indicator(M5Canvas *canvas, int x, int y) {
+  const int rxw = 10;
+  const int rxa = 3;
+  int rxx = x - rxw / 2;
+
+  canvas->drawLine(rxx, y, rxx + rxw, y, TFT_SILVER);
+  canvas->drawLine(rxx + rxw, y, rxx + rxw - rxa, y - rxa + 1, TFT_SILVER);
+  canvas->drawLine(rxx + rxw, y, rxx + rxw - rxa, y + rxa - 1, TFT_SILVER);
+}
+
 inline void draw_rssi_indicator(M5Canvas *canvas, int x, int y, int rssi)
 {
   const uint8_t bar1 = 2, bar2 = 5, bar3 = 8, bar4 = 11;
@@ -29,7 +49,10 @@ inline void draw_rssi_indicator(M5Canvas *canvas, int x, int y, int rssi)
   const uint8_t barY = y - bar4 / 2;
   const uint8_t barSpace = 2;
 
-  uint8_t barX = x;
+  canvas->drawLine(x, barY, x, barY + bar4 - 1, TFT_SILVER);
+  canvas->drawTriangle(x - 3, barY, x + 3, barY, x, barY + 3, TFT_SILVER);
+
+  uint8_t barX = x + 4;
   (rssi > -120)
   ? canvas->fillRect(barX, barY + (bar4 - bar1), barW, bar1, UX_COLOR_ACCENT)
   : canvas->drawRect(barX, barY + (bar4 - bar1), barW, bar1, TFT_SILVER);
