@@ -78,10 +78,12 @@ enum Settings
   TextSize = 2,
   PingMode = 3,
   RepeatMode = 4,
-  LoRaSettings = 5
+  WriteConfig = 5,
+  LoRaSettings = 6
 };
-const int SettingsCount = 6;
-const String SettingsNames[SettingsCount] = {"Username", "Brightness", "Text Size", "Ping Mode", "Repeat Mode", "LoRa Module Config"};
+const int SettingsCount = 7;
+const String SettingsNames[SettingsCount] = {"Username", "Brightness", "Text Size", "Ping Mode", "Repeat Mode", "App Config", "LoRa Config"};
+const String SettingsFilename = "/LoRaChat.conf";
 uint8_t activeSettingIndex;
 const uint8_t MinUsernameLength = 2; // TODO
 const uint8_t MaxUsernameLength = 6;
@@ -91,26 +93,27 @@ float chatTextSize = 1.0; // TODO: S, M, L?
 bool pingMode = true;
 bool repeatMode = false;
 int loraWriteStage = 0;
+int sdWriteStage = 0;
 
 // display layout constants
 const uint8_t w = 240; // M5Cardputer.Display.width();
 const uint8_t h = 135; // M5Cardputer.Display.height();
-const uint8_t m = 3;
-
-const uint8_t sx = m;
+const uint8_t m = 2;
+// system bar
+const uint8_t sx = 0;
 const uint8_t sy = 0;
-const uint8_t sw = w - 2 * m;
-const uint8_t sh = 18;
-
-const uint8_t tx = m;
-const uint8_t ty = sy + sh + m;
-const uint8_t tw = 18;
-const uint8_t th = h - ty - m;
-
+const uint8_t sw = w;
+const uint8_t sh = 20;
+// tab bar
+const uint8_t tx = 0;
+const uint8_t ty = sy + sh;
+const uint8_t tw = 16;
+const uint8_t th = h - ty;
+// main window
 const uint8_t wx = tw;
-const uint8_t wy = sy + sh + m;
-const uint8_t ww = w - wx - m;
-const uint8_t wh = h - wy - m;
+const uint8_t wy = sy + sh;
+const uint8_t ww = w - wx;
+const uint8_t wh = h - wy;
 
 // track state of system bar elements for redraws
 uint8_t batteryPct = M5Cardputer.Power.getBatteryLevel();
@@ -129,6 +132,32 @@ void printHexDump(const void *data, size_t size)
     }
   }
   USBSerial.print("\n");
+}
+
+void saveScreenshot()
+{
+  size_t pngLen;
+  uint8_t *pngBytes = (uint8_t *)M5Cardputer.Display.createPng(&pngLen, 0, 0, 240, 135);
+
+  int i = 0;
+  String filename;
+  do
+  {
+    filename = "/screenshot." + String(i++) + ".png";
+  } while (SD.exists(filename));
+
+  File file = SD.open(filename, FILE_WRITE);
+  if (file)
+  {
+    file.write(pngBytes, pngLen);
+    file.flush();
+    file.close();
+    USBSerial.println("saved screenshot to " + filename);
+  }
+  else
+  {
+    USBSerial.println("cannot save screenshot to file " + filename);
+  }
 }
 
 std::vector<String> getMessageLines(const String &message, int lineWidth)
@@ -207,27 +236,30 @@ bool recordPresence(const LoRaMessage &message)
 void drawSystemBar()
 {
   canvasSystemBar->fillSprite(BG_COLOR);
-  canvasSystemBar->fillRoundRect(sx, sy, sw, sh, 3, UX_COLOR_DARK);
+  canvasSystemBar->fillRoundRect(sx + m, sy, sw - 2 * m, sh - m, 3, UX_COLOR_DARK);
+  canvasSystemBar->fillRect(sx + m, sy, sw - 2 * m, 3, UX_COLOR_DARK); // fill round edges on top
   canvasSystemBar->setTextColor(TFT_SILVER, UX_COLOR_DARK);
-  canvasSystemBar->setTextDatum(middle_center);
   canvasSystemBar->setTextSize(1);
-  canvasSystemBar->drawString("LoRaChat", sw / 2, sy + sh / 2);
   canvasSystemBar->setTextDatum(middle_left);
-  canvasSystemBar->drawString(username, sx + m, sy + sh / 2);
+  canvasSystemBar->drawString(username, sx + 3 * m, sy + sh / 2);
+  canvasSystemBar->setTextDatum(middle_center);
+  canvasSystemBar->drawString("LoRaChat", sw / 2, sy + sh / 2);
   if (millis() - lastTx < RxTxShowDelay)
-    draw_tx_indicator(canvasSystemBar, sw - 71, sy + 1 * (sh / 3));
+    draw_tx_indicator(canvasSystemBar, sw - 71, sy + 1 * (sh / 3) - 1);
   if (millis() - lastRx < RxTxShowDelay)
-    draw_rx_indicator(canvasSystemBar, sw - 71, sy + 2 * (sh / 3));
-  draw_rssi_indicator(canvasSystemBar, sw - 60, sy + sh / 2, maxRssi);
-  draw_battery_indicator(canvasSystemBar, sw - 30, sy + sh / 2, batteryPct);
+    draw_rx_indicator(canvasSystemBar, sw - 71, sy + 2 * (sh / 3) - 1);
+  draw_rssi_indicator(canvasSystemBar, sw - 60, sy + sh / 2 - 1, maxRssi);
+  draw_battery_indicator(canvasSystemBar, sw - 30, sy + sh / 2 - 1, batteryPct);
   canvasSystemBar->pushSprite(sx, sy);
 }
 
 void drawTabBar()
 {
   canvasTabBar->fillSprite(BG_COLOR);
-  int tabh = (th + 4 * m) / 5;
-  int tabf = 5;
+  int tabx = m;
+  int tabw = tw;
+  int tabh = (th + 3 * m) / 5;
+  int tabm = 5;
 
   for (int i = 4;; i--)
   {
@@ -242,12 +274,12 @@ void drawTabBar()
     }
 
     unsigned short color = (i == activeTabIndex) ? UX_COLOR_ACCENT : UX_COLOR_DARK;
-    int taby = tabf + i * tabh - i * m;
+    int taby = tabm + i * tabh - i * m;
 
     // tab shape
-    canvasTabBar->fillTriangle(0, taby, tw, taby, tw, taby - tabf, color);
-    canvasTabBar->fillRect(0, taby, tw, tabh - 2 * tabf, color);
-    canvasTabBar->fillTriangle(0, taby + tabh - 2 * tabf, tw, taby + tabh - 2 * tabf, tw, taby + tabh - tabf, color);
+    canvasTabBar->fillTriangle(tabx, taby, tabw, taby, tabw, taby - tabm, color);
+    canvasTabBar->fillRect(tabx, taby, tabw, tabh - 2 * tabm, color);
+    canvasTabBar->fillTriangle(tabx, taby + tabh - 2 * tabm, tabw, taby + tabh - 2 * tabm, tabw, taby + tabh - tabm, color);
 
     // label/icon
     switch (i)
@@ -257,13 +289,13 @@ void drawTabBar()
     case 2:
       canvasTabBar->setTextColor(TFT_SILVER, color);
       canvasTabBar->setTextDatum(middle_center);
-      canvasTabBar->drawString(String(char('A' + i)), tw / 2 - 1, taby + tabh / 2 - tabf / 2 - 1);
+      canvasTabBar->drawString(String(char('A' + i)), tabx + tw / 2 - 1, taby + tabh / 2 - tabm / 2 - 2);
       break;
     case UserInfoTabIndex:
-      draw_user_icon(canvasTabBar, tw / 2 - 2, taby + tabh / 2 - tabf / 2 - 3);
+      draw_user_icon(canvasTabBar, tabx + tw / 2 - 1, taby + tabh / 2 - tabm / 2 - 3);
       break;
     case SettingsTabIndex:
-      draw_wrench_icon(canvasTabBar, tw / 2 - 2, taby + tabh / 2 - tabf / 2 - 3);
+      draw_wrench_icon(canvasTabBar, tabx + tw / 2 - 1, taby + tabh / 2 - tabm / 2 - 3);
       break;
     }
 
@@ -278,21 +310,22 @@ void drawTabBar()
 void drawChatWindow()
 {
   // TODO: only change when font changes
-  int rowCount = (wh - 2 * m) / (canvas->fontHeight() + m) - 1;
-  int colCount = (ww - 2 * m) / canvas->fontWidth() - 1;
+  int rowCount = (wh - 3 * m) / (canvas->fontHeight() + m) - 1;
+  int colCount = (ww - 4 * m) / canvas->fontWidth() - 1;
   int messageWidth = (colCount * 3) / 4;
   int messageBufferHeight = wh - ((canvas->fontHeight() + m) * rowCount) - m; // buffer takes last row plus extra space
-  int messageBufferY = wh - messageBufferHeight;
+  int messageBufferY = wh - messageBufferHeight + 2 * m;
 
   // draw message buffer
-  for (int i = -1; i <= 1; i++)
+  for (int i = 0; i <= 1; i++)
   {
     canvas->drawLine(10, messageBufferY + i, ww - 10, messageBufferY + i, UX_COLOR_LIGHT);
   }
+
   if (tabs[activeTabIndex].messageBuffer.length() > 0)
   {
     canvas->setTextDatum(middle_right);
-    canvas->drawString(tabs[activeTabIndex].messageBuffer, ww - m, messageBufferY + messageBufferHeight / 2);
+    canvas->drawString(tabs[activeTabIndex].messageBuffer, ww - 2 * m, messageBufferY + messageBufferHeight / 2);
   }
 
   // draw message window
@@ -310,12 +343,12 @@ void drawChatWindow()
       int cursorX;
       if (isOwnMessage)
       {
-        cursorX = ww - m;
+        cursorX = ww - 2 * m;
         canvas->setTextDatum(top_right);
       }
       else
       {
-        cursorX = m + 1;
+        cursorX = 2 * m;
         canvas->setTextDatum(top_left);
         message.text = message.username + message.text;
       }
@@ -323,7 +356,7 @@ void drawChatWindow()
       std::vector<String> lines = getMessageLines(message.text, messageWidth);
       for (int j = lines.size() - 1; j >= 0; j--)
       {
-        int cursorY = m + (rowCount - linesDrawn - 1) * (canvas->fontHeight() + m);
+        int cursorY = 2 * m + (rowCount - linesDrawn - 1) * (canvas->fontHeight() + m);
         // canvas->setTextColor(TFT_SILVER);
         if (j == 0 && !isOwnMessage)
         {
@@ -355,16 +388,17 @@ void drawChatWindow()
 
 void drawUserPresenceWindow()
 {
-  int rowCount = (wh - 2 * m) / (canvas->fontHeight() + m) - 1;
-  int colCount = (ww - 2 * m) / canvas->fontWidth() - 1;
+  // TODO: order by last seen
+  int entryYOffset = 20;
+  int rowHeight = m + canvas->fontHeight() + m;
+  int rowCount = (wh - entryYOffset) / rowHeight;
   int linesDrawn = 0;
-  int cursorX = m + 1;
-  int entryYOffset = 25;
+  int cursorX = 2 * m;
 
   canvas->setTextColor(TFT_SILVER);
   canvas->setTextDatum(top_center);
-  canvas->drawString("Users Seen", ww / 2, 2 * m - 1);
-  for (int i = -1; i <= 1; i++)
+  canvas->drawString("Users Seen", ww / 2, 2 * m);
+  for (int i = 0; i <= 1; i++)
   {
     canvas->drawLine(10, 3 * m + canvas->fontHeight() + i, ww - 10, 3 * m + canvas->fontHeight() + i, UX_COLOR_LIGHT);
   }
@@ -372,7 +406,7 @@ void drawUserPresenceWindow()
   canvas->setTextDatum(top_left);
   for (int i = 0; i < presence.size(); i++)
   {
-    int cursorY = entryYOffset + i * (m + canvas->fontHeight() + m);
+    int cursorY = entryYOffset + i * rowHeight;
     int lastSeenSecs = (millis() - presence[i].lastSeenMillis) / 1000;
 
     String lastSeenString = String(lastSeenSecs) + "s"; // show seconds by default
@@ -385,7 +419,7 @@ void drawUserPresenceWindow()
       lastSeenString = String(lastSeenSecs / 60) + "m";
     }
 
-    String userPresenceString = String(presence[i].username.c_str()) + " RSSI: " + String(presence[i].rssi) + ", last seen: " + lastSeenString;
+    String userPresenceString = String(presence[i].username.c_str()) + "RSSI: " + String(presence[i].rssi) + ", last seen: " + lastSeenString;
     int usernameWidth = canvas->fontWidth() * (presence[i].username.length() + 1);
 
     canvas->setTextColor(UX_COLOR_ACCENT2);
@@ -406,22 +440,20 @@ void drawUserPresenceWindow()
 
 void drawSettingsWindow()
 {
-  canvas->setTextDatum(top_center);
-
-  // int settingX = ww / 2;
-  int settingX = m + (SettingsNames[5].length() + 3) * canvas->fontWidth(); // width of longest setting name
+  int settingX = ww / 2 - 16;
   int settingXGap = 10;
-  int settingYOffset = 25;
+  int settingYOffset = 20;
 
   String loraSetting;
   int loraSettingColor = 0;
   switch (loraWriteStage)
   {
   case 0:
-    loraSetting = "Write?";
+    loraSetting = "Write to module?";
     break;
   case 1:
     loraSetting = "M0, M1 off?";
+    loraSettingColor = TFT_YELLOW;
     break;
   case 2:
     loraSetting = "OK!";
@@ -433,12 +465,34 @@ void drawSettingsWindow()
     break;
   }
 
+  String writeConfigSetting;
+  int writeConfigSettingColor = 0;
+  switch (sdWriteStage)
+  {
+  case 0:
+    writeConfigSetting = "Write to SD?";
+    break;
+  case 1:
+    writeConfigSetting = "Overwrite?";
+    writeConfigSettingColor = TFT_YELLOW;
+    break;
+  case 2:
+    writeConfigSetting = "OK!";
+    writeConfigSettingColor = TFT_GREEN;
+    break;
+  case 3:
+    writeConfigSetting = "Error!";
+    writeConfigSettingColor = TFT_RED;
+    break;
+  }
+
   String settingValues[SettingsCount];
   settingValues[Settings::Username] = username;
   settingValues[Settings::Brightness] = String(brightness);
-  settingValues[Settings::TextSize] = String(chatTextSize);
+  settingValues[Settings::TextSize] = "TODO"; // String(chatTextSize);
   settingValues[Settings::PingMode] = String(pingMode ? "On" : "Off");
   settingValues[Settings::RepeatMode] = String(repeatMode ? "On" : "Off");
+  settingValues[Settings::WriteConfig] = writeConfigSetting;
   settingValues[Settings::LoRaSettings] = loraSetting;
 
   int settingColors[SettingsCount];
@@ -447,11 +501,14 @@ void drawSettingsWindow()
   settingColors[Settings::TextSize] = 0;
   settingColors[Settings::PingMode] = pingMode ? TFT_GREEN : TFT_RED;
   settingColors[Settings::RepeatMode] = repeatMode ? TFT_GREEN : TFT_RED;
+  settingColors[Settings::WriteConfig] = writeConfigSettingColor;
   settingColors[Settings::LoRaSettings] = loraSettingColor;
 
-  canvas->drawString("Settings", ww / 2, 2 * m - 1);
+  canvas->setTextColor(TFT_SILVER);
+  canvas->setTextDatum(top_center);
+  canvas->drawString("Settings", ww / 2, 2 * m);
 
-  for (int i = -1; i <= 1; i++)
+  for (int i = 0; i <= 1; i++)
   {
     canvas->drawLine(10, 3 * m + canvas->fontHeight() + i, ww - 10, 3 * m + canvas->fontHeight() + i, UX_COLOR_LIGHT);
   }
@@ -474,7 +531,8 @@ void drawSettingsWindow()
 void drawMainWindow()
 {
   canvas->fillSprite(BG_COLOR);
-  canvas->fillRoundRect(0, 0, ww, wh, 3, UX_COLOR_MED);
+  canvas->fillRoundRect(0, 0, ww - m, wh - m, 3, UX_COLOR_MED);
+  canvas->fillRect(0, 0, 3, wh - m, UX_COLOR_MED); // removes rounded edges on left side for tabs
   canvas->setTextColor(TFT_SILVER, UX_COLOR_MED);
   canvas->setTextDatum(top_left);
 
@@ -517,7 +575,7 @@ void checkForMenuBoot()
   }
 }
 
-void checkForConfigFile()
+void readConfigFromSd()
 {
   M5Cardputer.update();
 
@@ -536,11 +594,14 @@ void checkForConfigFile()
     return;
   }
 
-  File configFile = SD.open("/LoRaChat.conf");
+  File configFile = SD.open(SettingsFilename, FILE_READ);
   if (!configFile)
+  {
+    USBSerial.println("config file " + SettingsFilename + " not found");
     return;
+  }
 
-  USBSerial.println("reading config file: LoRaChat.conf");
+  USBSerial.println("reading config file: " + SettingsFilename);
 
   while (configFile.available())
   {
@@ -576,7 +637,26 @@ void checkForConfigFile()
   }
 
   configFile.close();
-  SD.end();
+}
+
+bool writeConfigToSd()
+{
+  File configFile = SD.open(SettingsFilename, FILE_WRITE);
+  if (!configFile)
+  {
+    return false;
+  }
+
+  USBSerial.println("writing config file: " + SettingsFilename);
+
+  configFile.println("username=" + username);
+  configFile.println("brightness=" + String(brightness));
+  configFile.println("pingMode=" + pingMode ? "on" : "off");
+  configFile.println("repeatMode=" + repeatMode ? "on" : "off");
+
+  configFile.flush();
+  configFile.close();
+  return true;
 }
 
 void loraInit()
@@ -848,7 +928,7 @@ void handleSettingsTabInput(Keyboard_Class::KeysState keyState, uint8_t &redrawF
     //     input = Redraw::Window;
     //   }
     // }
-    // break;
+    break;
   case Settings::PingMode:
     for (auto c : keyState.word)
     {
@@ -880,6 +960,28 @@ void handleSettingsTabInput(Keyboard_Class::KeysState keyState, uint8_t &redrawF
       redrawFlags |= RedrawFlags::MainWindow;
     }
     break;
+  case Settings::WriteConfig:
+    if (keyState.enter)
+    {
+      switch (sdWriteStage)
+      {
+      case 0:
+        sdWriteStage++;
+        if (SD.exists(SettingsFilename))
+          break;
+      case 1:
+        sdWriteStage = (writeConfigToSd())
+                           ? sdWriteStage + 1
+                           : sdWriteStage + 2;
+        break;
+      default:
+        sdWriteStage = 0;
+        break;
+      }
+
+      redrawFlags |= RedrawFlags::MainWindow;
+    }
+    break;
   case Settings::LoRaSettings:
     if (keyState.enter)
     {
@@ -906,7 +1008,11 @@ void handleSettingsTabInput(Keyboard_Class::KeysState keyState, uint8_t &redrawF
     break;
   }
 
-  // reset lora write stage if unselected
+  if (activeSettingIndex != Settings::WriteConfig)
+  {
+    sdWriteStage = 0;
+  }
+
   if (activeSettingIndex != Settings::LoRaSettings)
   {
     loraWriteStage = 0;
@@ -961,6 +1067,11 @@ void keyboardInputTask(void *pvParameters)
 
       keyboardRedrawFlags = redrawFlags;
     }
+
+    if (M5Cardputer.BtnA.isPressed())
+    {
+      saveScreenshot();
+    }
   }
 }
 
@@ -974,7 +1085,7 @@ void setup()
   USBSerial.println("setup");
 
   checkForMenuBoot();
-  checkForConfigFile();
+  readConfigFromSd();
 
   M5Cardputer.Display.init();
   M5Cardputer.Display.setRotation(1);
