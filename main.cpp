@@ -86,7 +86,8 @@ const String SettingsNames[SettingsCount] = {"Username", "Brightness", "Text Siz
 const String SettingsFilename = "/LoRaChat.conf";
 uint8_t activeSettingIndex;
 const uint8_t MinUsernameLength = 2; // TODO
-const uint8_t MaxUsernameLength = 6;
+const uint8_t MaxUsernameLength = 8;
+const uint8_t MaxMessageLength = 100; // TODO
 String username = "anoncy";
 short brightness = 70;
 float chatTextSize = 1.0; // TODO: S, M, L?
@@ -94,6 +95,7 @@ bool pingMode = true;
 bool repeatMode = false;
 int loraWriteStage = 0;
 int sdWriteStage = 0;
+bool sdInit = false;
 
 // display layout constants
 const uint8_t w = 240; // M5Cardputer.Display.width();
@@ -470,7 +472,8 @@ void drawSettingsWindow()
   switch (sdWriteStage)
   {
   case 0:
-    writeConfigSetting = "Write to SD?";
+    writeConfigSetting = sdInit ? "Write to SD?" : "No SD found";
+    writeConfigSettingColor = sdInit ? 0 : TFT_YELLOW;
     break;
   case 1:
     writeConfigSetting = "Overwrite?";
@@ -584,12 +587,12 @@ void readConfigFromSd()
              M5.getPin(m5::pin_name_t::sd_spi_miso),
              M5.getPin(m5::pin_name_t::sd_spi_mosi),
              M5.getPin(m5::pin_name_t::sd_spi_ss));
-  while (!SD.begin(M5.getPin(m5::pin_name_t::sd_spi_ss), SPI2) && retries-- > 0)
+  while (!(sdInit = SD.begin(M5.getPin(m5::pin_name_t::sd_spi_ss), SPI2)) && retries-- > 0)
   {
     delay(100);
   }
 
-  if (retries == 0)
+  if (!sdInit)
   {
     return;
   }
@@ -641,6 +644,11 @@ void readConfigFromSd()
 
 bool writeConfigToSd()
 {
+  if (!sdInit)
+  {
+    return false;
+  }
+
   File configFile = SD.open(SettingsFilename, FILE_WRITE);
   if (!configFile)
   {
@@ -701,26 +709,42 @@ void loraCreateFrame(int channel, const String &messageText, uint8_t *frameData,
   //   std::cerr << "Error: Insufficient space to create the message." << std::endl;
   //   return;
   // }
-  USBSerial.printf("creating frame: |%d|%d|%s|%s|\n", loraNonce, channel, username, messageText);
+  USBSerial.printf("creating frame: |%d|%d|%s|%s|\n", channel, loraNonce, username, messageText);
+  frameDataLength = 0;
 
   frameData[0] = (loraNonce & 0x3F) | ((channel & 0x03) << 6);
-  std::memcpy(frameData + 1, username.c_str(), min(username.length() + 1, (unsigned int)MaxUsernameLength));
-  std::memcpy(frameData + MaxUsernameLength + 1, messageText.c_str(), messageText.length() + 1);
-  frameDataLength = MaxUsernameLength + messageText.length() + 2;
+  frameDataLength += 1;
+
+  size_t usernameByteLength = min(username.length() + 1, (unsigned int)MaxUsernameLength + 1);
+  std::memcpy(frameData + frameDataLength, username.c_str(), usernameByteLength);
+  frameDataLength += usernameByteLength;
+
+  size_t messageTextByteLength = min(messageText.length() + 1, (unsigned int)MaxMessageLength + 1);
+  if (messageTextByteLength > 1)
+  {
+    std::memcpy(frameData + frameDataLength, messageText.c_str(), messageTextByteLength);
+    frameDataLength += messageTextByteLength;
+  }
 }
 
 void loraParseFrame(const uint8_t *frameData, size_t frameDataLength, LoRaMessage &message)
 {
-  if (frameDataLength < 8) // TODO: max
+  if (frameDataLength < (1 + MinUsernameLength + 1) || frameDataLength > (1 + MaxUsernameLength + 1 + MaxMessageLength + 1)) // TODO: test
     return;
 
+  size_t frameBytesRead = 0;
+  
   message.nonce = (frameData[0] & 0x3F);
   message.channel = ((frameData[0] >> 6) & 0x03);
-  message.username = String((const char *)(frameData + 1), MaxUsernameLength).c_str();
-  size_t messageLength = frameDataLength - 7;
-  message.text = String((const char *)(frameData + 7), messageLength - 1).c_str();
+  frameBytesRead += 1;
 
-  USBSerial.printf("parsed frame: |%d|%d|%s|%s|\n", message.nonce, message.channel, message.username, message.text.c_str());
+  message.username = String((const char *)(frameData + frameBytesRead), MaxUsernameLength).c_str();
+  frameBytesRead += message.username.length() + 1;
+
+  size_t messageLength = frameDataLength - frameBytesRead;
+  message.text = String((const char *)(frameData + frameBytesRead), messageLength).c_str();
+
+  USBSerial.printf("parsed frame: |%d|%d|%s|%s|\n", message.channel, message.nonce, message.username, message.text.c_str());
 }
 
 bool loraSendMessage(int channel, const String &messageText, LoRaMessage &sentMessage)
@@ -963,6 +987,9 @@ void handleSettingsTabInput(Keyboard_Class::KeysState keyState, uint8_t &redrawF
   case Settings::WriteConfig:
     if (keyState.enter)
     {
+      if (!sdInit)
+        break;
+
       switch (sdWriteStage)
       {
       case 0:
