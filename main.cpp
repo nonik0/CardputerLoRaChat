@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <EEPROM.h>
 #include <M5Cardputer.h>
 #include <M5StackUpdater.h>
 #include <M5_LoRa_E220_JP.h>
@@ -21,7 +20,7 @@ enum RedrawFlags
 struct LoRaMessage
 {
   uint8_t nonce : 6;
-  uint8_t channel : 2; // 4 channels, 0b00->ping,0b01,0b10,0b11 are 3 channels
+  uint8_t channel : 2; // 4 channels, 0b01,0b10,0b11 channels, 0b11 reserved for pings
   String username;     // use MAC or something tied to device?
   int rssi;
   String text;
@@ -36,8 +35,7 @@ struct Presence
 };
 std::vector<Presence> presence;
 
-// TODO: rename Channel, ChatTab?
-struct Tab
+struct ChatTab
 {
   unsigned char channel;
   // TODO: access in thread-safe way
@@ -67,8 +65,9 @@ const int RxTxShowDelay = 1000; // ms
 uint8_t activeTabIndex;
 const uint8_t UserInfoTabIndex = 3;
 const uint8_t SettingsTabIndex = 4;
+const uint8_t ChatTabCount = 3;
 const uint8_t TabCount = 5;
-Tab tabs[TabCount]; // TODO only need for chat tabs
+ChatTab chatTab[ChatTabCount];
 
 // settings
 enum Settings
@@ -89,7 +88,7 @@ const uint8_t MinUsernameLength = 2; // TODO
 const uint8_t MaxUsernameLength = 8;
 const uint8_t MaxMessageLength = 100; // TODO
 String username = "anoncy";
-short brightness = 70;
+uint8_t brightness = 70;
 float chatTextSize = 1.0; // TODO: S, M, L?
 bool pingMode = true;
 bool repeatMode = false;
@@ -160,6 +159,8 @@ void saveScreenshot()
   {
     USBSerial.println("cannot save screenshot to file " + filename);
   }
+
+  free(pngBytes);
 }
 
 std::vector<String> getMessageLines(const String &message, int lineWidth)
@@ -324,22 +325,22 @@ void drawChatWindow()
     canvas->drawLine(10, messageBufferY + i, ww - 10, messageBufferY + i, UX_COLOR_LIGHT);
   }
 
-  if (tabs[activeTabIndex].messageBuffer.length() > 0)
+  if (chatTab[activeTabIndex].messageBuffer.length() > 0)
   {
     canvas->setTextDatum(middle_right);
-    canvas->drawString(tabs[activeTabIndex].messageBuffer, ww - 2 * m, messageBufferY + messageBufferHeight / 2);
+    canvas->drawString(chatTab[activeTabIndex].messageBuffer, ww - 2 * m, messageBufferY + messageBufferHeight / 2);
   }
 
   // draw message window
-  if (tabs[activeTabIndex].messages.size() > 0)
+  if (chatTab[activeTabIndex].messages.size() > 0)
   {
     int linesDrawn = 0;
 
     // draw all messages or until window is full
     // TODO: view index, scrolling
-    for (int i = tabs[activeTabIndex].messages.size() - 1; i >= 0; i--)
+    for (int i = chatTab[activeTabIndex].messages.size() - 1; i >= 0; i--)
     {
-      LoRaMessage message = tabs[activeTabIndex].messages[i];
+      LoRaMessage message = chatTab[activeTabIndex].messages[i];
       bool isOwnMessage = message.username.isEmpty();
 
       int cursorX;
@@ -558,30 +559,8 @@ void drawMainWindow()
 }
 
 SPIClass SPI2;
-void checkForMenuBoot()
+bool sdCardInit()
 {
-  M5Cardputer.update();
-
-  if (M5Cardputer.Keyboard.isKeyPressed('a'))
-  {
-    SPI2.begin(M5.getPin(m5::pin_name_t::sd_spi_sclk),
-               M5.getPin(m5::pin_name_t::sd_spi_miso),
-               M5.getPin(m5::pin_name_t::sd_spi_mosi),
-               M5.getPin(m5::pin_name_t::sd_spi_ss));
-    while (!SD.begin(M5.getPin(m5::pin_name_t::sd_spi_ss), SPI2))
-    {
-      delay(500);
-    }
-
-    updateFromFS(SD, "/menu.bin");
-    ESP.restart();
-  }
-}
-
-void readConfigFromSd()
-{
-  M5Cardputer.update();
-
   uint8_t retries = 3;
   SPI2.begin(M5.getPin(m5::pin_name_t::sd_spi_sclk),
              M5.getPin(m5::pin_name_t::sd_spi_miso),
@@ -592,7 +571,25 @@ void readConfigFromSd()
     delay(100);
   }
 
-  if (!sdInit)
+  return sdInit;
+}
+
+void checkForMenuBoot()
+{
+  M5Cardputer.update();
+
+  if (M5Cardputer.Keyboard.isKeyPressed('a') && sdCardInit())
+  {
+    updateFromFS(SD, "/menu.bin");
+    ESP.restart();
+  }
+}
+
+void readConfigFromSd()
+{
+  M5Cardputer.update();
+
+  if (!sdInit && !sdCardInit())
   {
     return;
   }
@@ -644,8 +641,9 @@ void readConfigFromSd()
 
 bool writeConfigToSd()
 {
-  if (!sdInit)
+  if (!sdInit && !sdCardInit())
   {
+    log_w("cannot initialize SD card");
     return false;
   }
 
@@ -733,7 +731,7 @@ void loraParseFrame(const uint8_t *frameData, size_t frameDataLength, LoRaMessag
     return;
 
   size_t frameBytesRead = 0;
-  
+
   message.nonce = (frameData[0] & 0x3F);
   message.channel = ((frameData[0] >> 6) & 0x03);
   frameBytesRead += 1;
@@ -763,7 +761,7 @@ bool loraSendMessage(int channel, const String &messageText, LoRaMessage &sentMe
     sentMessage.channel = channel;
     sentMessage.nonce = loraNonce++;
     sentMessage.username = "";
-    sentMessage.text = tabs[activeTabIndex].messageBuffer;
+    sentMessage.text = chatTab[activeTabIndex].messageBuffer;
     sentMessage.rssi = 0;
 
     lastTx = millis();
@@ -783,7 +781,7 @@ void loraReceiveTask(void *pvParameters)
 {
   while (1)
   {
-    if (lora.ReceiveFrame(&loraFrame) == 0)
+    if (lora.RecieveFrame(&loraFrame) == 0)
     {
       USBSerial.print("received frame: ");
       printHexDump(loraFrame.recv_data, loraFrame.recv_data_len);
@@ -807,7 +805,7 @@ void loraReceiveTask(void *pvParameters)
       if (message.text.isEmpty())
         continue;
 
-      tabs[message.channel].messages.push_back(message);
+      chatTab[message.channel].messages.push_back(message);
 
       if (repeatMode)
       {
@@ -815,7 +813,7 @@ void loraReceiveTask(void *pvParameters)
         LoRaMessage sentMessage;
         if (loraSendMessage(message.channel, response, sentMessage))
         {
-          tabs[activeTabIndex].messages.push_back(sentMessage);
+          chatTab[activeTabIndex].messages.push_back(sentMessage);
         }
       }
     }
@@ -873,35 +871,35 @@ bool updateStringFromInput(Keyboard_Class::KeysState keyState, String &str, int 
 
 void handleChatTabInput(Keyboard_Class::KeysState keyState, uint8_t &redrawFlags)
 {
-  if (updateStringFromInput(keyState, tabs[activeTabIndex].messageBuffer))
+  if (updateStringFromInput(keyState, chatTab[activeTabIndex].messageBuffer))
   {
     redrawFlags |= RedrawFlags::MainWindow;
   }
 
   if (keyState.enter)
   {
-    USBSerial.println(tabs[activeTabIndex].messageBuffer);
+    USBSerial.println(chatTab[activeTabIndex].messageBuffer);
 
-    tabs[activeTabIndex].messageBuffer.trim();
+    chatTab[activeTabIndex].messageBuffer.trim();
 
     // empty message reserved for pings
-    if (tabs[activeTabIndex].messageBuffer.isEmpty())
+    if (chatTab[activeTabIndex].messageBuffer.isEmpty())
     {
       return;
     }
 
     LoRaMessage sentMessage;
-    if (loraSendMessage(activeTabIndex, tabs[activeTabIndex].messageBuffer, sentMessage))
+    if (loraSendMessage(activeTabIndex, chatTab[activeTabIndex].messageBuffer, sentMessage))
     {
-      tabs[activeTabIndex].messages.push_back(sentMessage);
+      chatTab[activeTabIndex].messages.push_back(sentMessage);
     }
     else
     {
       sentMessage.text = "send failed";
-      tabs[activeTabIndex].messages.push_back(sentMessage);
+      chatTab[activeTabIndex].messages.push_back(sentMessage);
     }
 
-    tabs[activeTabIndex].messageBuffer.clear();
+    chatTab[activeTabIndex].messageBuffer.clear();
     redrawFlags |= RedrawFlags::MainWindow;
   }
 }
@@ -1057,9 +1055,10 @@ void keyboardInputTask(void *pvParameters)
     if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed())
     {
       uint8_t redrawFlags = RedrawFlags::None;
-      unsigned long currentMillis = millis();
-      if (currentMillis - lastKeyPressMillis >= debounceDelay)
+      if (millis() - lastKeyPressMillis >= debounceDelay)
       {
+        lastKeyPressMillis = millis();
+        
         // need to see again with display off
         if (brightness <= 30 && !M5Cardputer.Keyboard.isKeyPressed(','))
         {
@@ -1068,7 +1067,6 @@ void keyboardInputTask(void *pvParameters)
           redrawFlags |= RedrawFlags::MainWindow;
         }
 
-        lastKeyPressMillis = currentMillis;
         Keyboard_Class::KeysState keyState = M5Cardputer.Keyboard.keysState();
 
         if (activeTabIndex == SettingsTabIndex)
@@ -1125,11 +1123,9 @@ void setup()
   canvasTabBar = new M5Canvas(&M5Cardputer.Display);
   canvasTabBar->createSprite(tw, th);
 
-  tabs[0] = {0, {}, "", 0};
-  tabs[1] = {1, {}, "", 0};
-  tabs[2] = {2, {}, "", 0};
-  tabs[3] = {3, {}, "", 0};
-  tabs[4] = {4, {}, "", 0};
+  chatTab[0] = {0, {}, "", 0};
+  chatTab[1] = {1, {}, "", 0};
+  chatTab[2] = {2, {}, "", 0};
   activeTabIndex = 0;
   activeSettingIndex = 0;
 
