@@ -789,7 +789,6 @@ void loraReceiveTask(void *pvParameters)
       LoRaMessage message;
       loraParseFrame(loraFrame.recv_data, loraFrame.recv_data_len, message);
       message.rssi = loraFrame.rssi;
-      receivedMessage = true;
       lastRx = millis();
       updateDelay = 0;
 
@@ -806,6 +805,7 @@ void loraReceiveTask(void *pvParameters)
         continue;
 
       chatTab[message.channel].messages.push_back(message);
+      receivedMessage = true;
 
       if (repeatMode)
       {

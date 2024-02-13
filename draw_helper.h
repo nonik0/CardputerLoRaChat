@@ -53,22 +53,22 @@ inline void draw_rssi_indicator(M5Canvas *canvas, int x, int y, int rssi)
   canvas->drawTriangle(x - 3, barY, x + 3, barY, x, barY + 3, TFT_SILVER);
 
   uint8_t barX = x + 4;
-  (rssi > -120)
+  (rssi > -130)
   ? canvas->fillRect(barX, barY + (bar4 - bar1), barW, bar1, UX_COLOR_ACCENT)
   : canvas->drawRect(barX, barY + (bar4 - bar1), barW, bar1, TFT_SILVER);
 
   barX += barW + barSpace;
-  (rssi > -90)
+  (rssi > -100)
   ? canvas->fillRect(barX, barY + (bar4 - bar2), barW, bar2, UX_COLOR_ACCENT)
   : canvas->drawRect(barX, barY + (bar4 - bar2), barW, bar2, TFT_SILVER);
 
   barX += barW + barSpace;
-  (rssi > -60)
+  (rssi > -70)
   ? canvas->fillRect(barX, barY + (bar4 - bar3), barW, bar3, UX_COLOR_ACCENT)
   : canvas->drawRect(barX, barY + (bar4 - bar3), barW, bar3, TFT_SILVER);
 
   barX += barW + barSpace;
-  (rssi > -30)
+  (rssi > -40)
   ? canvas->fillRect(barX, barY + (bar4 - bar4), barW, bar4, UX_COLOR_ACCENT)
   : canvas->drawRect(barX, barY + (bar4 - bar4), barW, bar4, TFT_SILVER);
 }
