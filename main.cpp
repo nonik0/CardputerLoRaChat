@@ -153,7 +153,7 @@ void saveScreenshot()
     file.write(pngBytes, pngLen);
     file.flush();
     file.close();
-    USBSerial.println("saved screenshot to " + filename);
+    USBSerial.println("saved screenshot to " + filename + ", " + String(pngLen) + " bytes");
   }
   else
   {
