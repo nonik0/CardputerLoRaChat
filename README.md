@@ -10,7 +10,7 @@ The interface is split into 5 tabs. The first three tabs are separate chat chann
 ## Tab Info
 Tab|Image|Info
 ---|---|---
-Chat Tab|![chatWindow](https://github.com/nonik0/CardputerLoRaChat/assets/17152317/2f14c060-d6e2-4bbd-a743-855d09410a38)|A, B, and C chat channels.
+Chat Tab|![chatWindow](https://github.com/nonik0/CardputerLoRaChat/assets/17152317/2f14c060-d6e2-4bbd-a743-855d09410a38)|A, B, and C chat channels. Use keyboard and enter to type and send messages.
 Users Seen|![userTab](https://github.com/nonik0/CardputerLoRaChat/assets/17152317/cbe63ba1-48d6-478e-8def-97ffdfe75c00)|Shows users seen in chat and with pings. Shows last received signal strength and when last seen.
 Settings|![settingsTab](https://github.com/nonik0/CardputerLoRaChat/assets/17152317/a966e694-fa3e-4055-949d-657cdcda9707)|Use arrow keys and enter to navigate settings. Use keyboard to update username when highlighted.
 
