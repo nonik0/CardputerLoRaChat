@@ -8,25 +8,28 @@ jobs:
 
     steps:
       - uses: actions/checkout@v3
+
       - uses: actions/cache@v3
         with:
           path: |
             ~/.cache/pip
             ~/.platformio/.cache
           key: ${{ runner.os }}-pio
+
       - uses: actions/setup-python@v4
         with:
           python-version: '3.9'
+
       - name: Install PlatformIO Core
         run: pip install --upgrade platformio
 
       - name: Build PlatformIO Project
         run: pio run
 
-      - name: Rename bin file 
+      - name: Rename Bin File 
         run: mv .pio/build/m5cardputer/firmware.bin LoRaChat.bin    
 
-      - name: Upload a Build Artifact
+      - name: Upload Build Artifact
         uses: actions/upload-artifact@v4.3.1
         with:
           name: CardputerLoRaChat
@@ -40,9 +43,8 @@ jobs:
     if: github.ref_type == 'tag'
 
     steps:
-    - uses: actions/download-artifact@v4
-      with:
-        merge-multiple: true
+    - name: Download Build Artifact
+      uses: actions/download-artifact@v4
 
     - name: Release ${{ github.ref_name }}
       uses: softprops/action-gh-release@v1
