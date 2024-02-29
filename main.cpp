@@ -969,9 +969,14 @@ void handleSettingsTabInput(Keyboard_Class::KeysState keyState, uint8_t &redrawF
         redrawFlags |= RedrawFlags::MainWindow;
 
         if (espNowMode)
+        {
           espNowInit();
+        }
         else
+        {
           espNowDeinit();
+          loraInit();
+        }
       }
     }
     break;
@@ -1126,7 +1131,14 @@ void setup()
   drawTabBar();
   drawMainWindow();
 
-  loraInit();
+  if (espNowMode)
+  {
+    espNowInit();
+  }
+  else
+  {
+    loraInit();
+  }
 
   xTaskCreateUniversal(loraReceiveTask, "loraReceiveTask", 8192, NULL, 1, NULL, APP_CPU_NUM);
   xTaskCreateUniversal(pingTask, "pingTask", 8192, NULL, 1, NULL, APP_CPU_NUM);
