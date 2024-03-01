@@ -1,4 +1,5 @@
 #include <esp_now.h>
+#include <esp_wifi.h>
 #include <M5Cardputer.h>
 #include <M5StackUpdater.h>
 #include <M5_LoRa_E220_JP.h>
@@ -7,17 +8,24 @@
 #include "common.h"
 #include "draw_helper.h"
 
-#define PING_INTERVAL_MS 1000 * 60        // 1 minute
-#define PRESENCE_TIMEOUT_MS 1000 * 60 * 5 // 5 minutes, the time before a msg "expires" for the purposes of tracking a user presence
+#define PING_CHANNEL 0b11
+#define PING_MESSAGE ""
+#define LORA_PING_INTERVAL_MS 1000 * 60    // 1 minute
+#define ESP_NOW_PING_INTERVAL_MS 1000 * 15   // 15 seconds
+#define PRESENCE_TIMEOUT_MS 1000 * 60 * 3 // 3 minutes, the time before a msg "expires" for the purposes of tracking a user presence
 
 uint8_t messageNonce = 0;
 
 LoRa_E220_JP lora;
 struct LoRaConfigItem_t loraConfig;
 struct RecvFrame_t loraFrame;
+TaskHandle_t loraReceiveTaskHandle = NULL;
+bool isLoraInit = false;
 
 uint8_t espNowBroadcastAddress[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 esp_now_peer_info_t espNowBroadcastPeerInfo;
+int espNowLastRssi = 0;
+bool isEspNowInit = false;
 
 M5Canvas *canvas;
 M5Canvas *canvasSystemBar;
@@ -30,6 +38,10 @@ volatile int updateDelay = 0;
 volatile unsigned long lastRx = false;
 volatile unsigned long lastTx = false;
 const int RxTxShowDelay = 1000; // ms
+
+// system bar state
+uint8_t batteryPct = M5Cardputer.Power.getBatteryLevel();
+int maxRssi = -1000;
 
 // tab state
 uint8_t activeTabIndex;
@@ -44,7 +56,7 @@ uint8_t activeSettingIndex;
 const uint8_t MinUsernameLength = 2; // TODO
 const uint8_t MaxUsernameLength = 8;
 const uint8_t MaxMessageLength = 100; // TODO
-String username = "anoncy";
+String username = "user";
 uint8_t brightness = 70;
 float chatTextSize = 1.0; // TODO: S, M, L?
 bool pingMode = true;
@@ -74,10 +86,6 @@ const uint8_t wx = tw;
 const uint8_t wy = sy + sh;
 const uint8_t ww = w - wx;
 const uint8_t wh = h - wy;
-
-// track state of system bar elements for redraws
-uint8_t batteryPct = M5Cardputer.Power.getBatteryLevel();
-int maxRssi = -1000;
 
 String getHexString(const void *data, size_t size)
 {
@@ -167,6 +175,13 @@ int getPresenceRssi()
 
   for (auto presence : presence)
   {
+    // only consider presences that match the current mode
+    if (espNowMode && !presence.isEspNow ||
+        !espNowMode && presence.isEspNow)
+    {
+      continue;
+    }
+
     // only consider presences that have been seen recently
     if (presence.rssi > maxRssiAllUsers && millis() - presence.lastSeenMillis < PRESENCE_TIMEOUT_MS)
     {
@@ -179,9 +194,11 @@ int getPresenceRssi()
 
 bool recordPresence(const Message &message)
 {
+  // return true if presence is new or renewed
+
   for (int i = 0; i < presence.size(); i++)
   {
-    if (presence[i].username == message.username)
+    if (presence[i].username == message.username && presence[i].isEspNow == message.isEspNow)
     {
       presence[i].rssi = message.rssi;
 
@@ -191,7 +208,8 @@ bool recordPresence(const Message &message)
     }
   }
 
-  presence.push_back({message.username, message.rssi, millis()});
+  log_w("new %s presence: %s", message.isEspNow ? "ESP-NOW" : "LoRa", message.username.c_str());
+  presence.push_back({message.username, message.isEspNow, message.rssi, millis()});
   return true;
 }
 
@@ -205,12 +223,12 @@ void drawSystemBar()
   canvasSystemBar->setTextDatum(middle_left);
   canvasSystemBar->drawString(username, sx + 3 * m, sy + sh / 2);
   canvasSystemBar->setTextDatum(middle_center);
-  canvasSystemBar->drawString("LoRaChat", sw / 2, sy + sh / 2);
+  canvasSystemBar->drawString(espNowMode ? "EspNowChat" : "LoRaChat", sw / 2, sy + sh / 2);
   if (millis() - lastTx < RxTxShowDelay)
     draw_tx_indicator(canvasSystemBar, sw - 71, sy + 1 * (sh / 3) - 1);
   if (millis() - lastRx < RxTxShowDelay)
     draw_rx_indicator(canvasSystemBar, sw - 71, sy + 2 * (sh / 3) - 1);
-  draw_rssi_indicator(canvasSystemBar, sw - 60, sy + sh / 2 - 1, maxRssi);
+  draw_rssi_indicator(canvasSystemBar, sw - 60, sy + sh / 2 - 1, maxRssi, !espNowMode);
   draw_battery_indicator(canvasSystemBar, sw - 30, sy + sh / 2 - 1, batteryPct);
   canvasSystemBar->pushSprite(sx, sy);
 }
@@ -302,6 +320,12 @@ void drawChatWindow()
       Message message = chatTab[activeTabIndex].messages[i];
       bool isOwnMessage = message.username.isEmpty();
 
+      // show only messages that match the current mode
+      if (message.isEspNow != espNowMode)
+      {
+        continue;
+      }
+
       int cursorX;
       if (isOwnMessage)
       {
@@ -323,10 +347,12 @@ void drawChatWindow()
         if (j == 0 && !isOwnMessage)
         {
           int usernameWidth = canvas->fontWidth() * (message.username.length() + 1);
+          int textColor = UX_COLOR_ACCENT2;
+          int borderColor = UX_COLOR_ACCENT;
 
-          canvas->setTextColor(UX_COLOR_ACCENT2);
+          canvas->setTextColor(textColor);
           canvas->drawString(lines[j].substring(0, message.username.length()), cursorX, cursorY);
-          canvas->drawRoundRect(cursorX - 2, cursorY - 2, usernameWidth - 3, canvas->fontHeight() + 4, 2, UX_COLOR_ACCENT);
+          canvas->drawRoundRect(cursorX - 2, cursorY - 2, usernameWidth - 3, canvas->fontHeight() + 4, 2, borderColor);
 
           canvas->setTextColor(TFT_SILVER);
           canvas->drawString(lines[j].substring(message.username.length()), cursorX + usernameWidth, cursorY);
@@ -368,6 +394,13 @@ void drawUserPresenceWindow()
   canvas->setTextDatum(top_left);
   for (int i = 0; i < presence.size(); i++)
   {
+    // only display presences that match the current mode
+    if (espNowMode && !presence[i].isEspNow ||
+        !espNowMode && presence[i].isEspNow)
+    {
+      continue;
+    }
+
     int cursorY = entryYOffset + i * rowHeight;
     int lastSeenSecs = (millis() - presence[i].lastSeenMillis) / 1000;
 
@@ -383,10 +416,12 @@ void drawUserPresenceWindow()
 
     String userPresenceString = String(presence[i].username.c_str()) + "RSSI: " + String(presence[i].rssi) + ", last seen: " + lastSeenString;
     int usernameWidth = canvas->fontWidth() * (presence[i].username.length() + 1);
+    int textColor = UX_COLOR_ACCENT2;
+    int borderColor = UX_COLOR_ACCENT;
 
-    canvas->setTextColor(UX_COLOR_ACCENT2);
+    canvas->setTextColor(textColor);
     canvas->drawString(userPresenceString.substring(0, presence[i].username.length()), cursorX, cursorY);
-    canvas->drawRoundRect(cursorX - 2, cursorY - 2, usernameWidth - 3, canvas->fontHeight() + 4, 2, UX_COLOR_ACCENT);
+    canvas->drawRoundRect(cursorX - 2, cursorY - 2, usernameWidth - 3, canvas->fontHeight() + 4, 2, borderColor);
 
     canvas->setTextColor(TFT_SILVER);
     canvas->drawString(userPresenceString.substring(presence[i].username.length()), cursorX + usernameWidth, cursorY);
@@ -596,7 +631,7 @@ void readConfigFromSd()
     else if (name == "espnowmode")
     {
       espNowMode = (value == "true" || value == "1" || value == "on");
-      log_w("espNowMode: %s", String(repeatMode));
+      log_w("espNowMode: %s", String(espNowMode));
     }
   }
 
@@ -619,11 +654,27 @@ bool writeConfigToSd()
 
   log_w("writing config file: %s", SettingsFilename.c_str());
 
-  configFile.println("username=" + username);
-  configFile.println("brightness=" + String(brightness));
-  configFile.println("pingMode=" + pingMode ? "on" : "off");
-  configFile.println("repeatMode=" + repeatMode ? "on" : "off");
-  configFile.println("espNowMode=" + repeatMode ? "on" : "off");
+  char configLine[100];
+
+  sprintf(configLine, "username=%s", username.c_str());
+  log_w("writing line: %s", configLine);
+  configFile.println(configLine);
+
+  sprintf(configLine, "brightness=%s", String(brightness).c_str());
+  log_w("writing line: %s", configLine);
+  configFile.println(configLine);
+
+  sprintf(configLine, "pingMode=%s", pingMode ? "on" : "off");
+  log_w("writing line: %s", configLine);
+  configFile.println(configLine);
+
+  sprintf(configLine, "repeatMode=%s", repeatMode ? "on" : "off");
+  log_w("writing line: %s", configLine);
+  configFile.println(configLine);
+
+  sprintf(configLine, "espNowMode=%s", espNowMode ? "on" : "off");
+  log_w("writing line: %s", configLine);
+  configFile.println(configLine);
 
   configFile.flush();
   configFile.close();
@@ -691,6 +742,7 @@ bool sendMessage(int channel, const String &messageText, Message &sentMessage)
     sentMessage.nonce = messageNonce++;
     sentMessage.username = "";
     sentMessage.text = chatTab[activeTabIndex].messageBuffer;
+    sentMessage.isEspNow = espNowMode;
     sentMessage.rssi = 0;
 
     lastTx = millis();
@@ -709,23 +761,24 @@ bool sendMessage(int channel, const String &messageText, Message &sentMessage)
   return false;
 }
 
-void receiveMessage(const uint8_t *frameData, size_t frameDataLength, int rssi)
+void receiveMessage(const uint8_t *frameData, size_t frameDataLength, int rssi, bool isEspNow)
 {
   log_w("received frame: %s", getHexString(frameData, frameDataLength).c_str());
 
   Message message;
   parseFrame(frameData, frameDataLength, message);
+  message.isEspNow = isEspNow;
   message.rssi = rssi;
   lastRx = millis();
   updateDelay = 0;
 
   // TODO: check nonce, replay for basic meshing
 
-  // send an immediate ping to announce self if new presence (new user or been a while for existing one)
-  if (recordPresence(message) && !repeatMode)
+  if (recordPresence(message) && !repeatMode && millis() - lastTx > 1000)
   {
+    log_w("new presence, sending response ping");
     Message sentMessage;
-    sendMessage(0b11, "", sentMessage);
+    sendMessage(PING_CHANNEL, "", sentMessage);
   }
 
   if (message.text.isEmpty())
@@ -736,7 +789,7 @@ void receiveMessage(const uint8_t *frameData, size_t frameDataLength, int rssi)
 
   if (repeatMode)
   {
-    String response = String("name: " + String(message.username) + ", msg: " + String(message.text) + ", rssi: " + String(loraFrame.rssi));
+    String response = String("name: " + String(message.username) + ", msg: " + String(message.text) + ", rssi: " + String(rssi));
     Message sentMessage;
     if (sendMessage(message.channel, response, sentMessage))
     {
@@ -749,13 +802,14 @@ void pingTask(void *pvParameters)
 {
   // send out a ping every so often during inactivity to keep presence for other users
   Message sentMessage;
-  sendMessage(0b11, "", sentMessage);
+  sendMessage(PING_CHANNEL, PING_MESSAGE, sentMessage);
 
   while (1)
   {
-    if (pingMode && millis() - lastTx > PING_INTERVAL_MS)
+    unsigned long pingInterval = espNowMode ? ESP_NOW_PING_INTERVAL_MS : LORA_PING_INTERVAL_MS;
+    if (pingMode && millis() - lastTx > pingInterval)
     {
-      sendMessage(0b11, "", sentMessage);
+      sendMessage(PING_CHANNEL, PING_MESSAGE, sentMessage);
     }
 
     delay(1000);
@@ -764,26 +818,18 @@ void pingTask(void *pvParameters)
 
 void espNowOnReceive(const uint8_t *mac, const uint8_t *data, int dataLength)
 {
-  receiveMessage(data, dataLength, 0);
-}
+  // look backwards from the data pointer to find the start of the wifi frame to get RSSI
+  // https://github.com/espressif/esp-now/blob/a60681b6453d060e7da7a1f7bcee15fded68d904/src/espnow/src/espnow.c#L187
+  wifi_promiscuous_pkt_t *promiscuous_pkt = (wifi_promiscuous_pkt_t *)(data - sizeof(wifi_pkt_rx_ctrl_t) - sizeof(espnow_frame_format_t));
+  wifi_pkt_rx_ctrl_t *rx_ctrl = &promiscuous_pkt->rx_ctrl;
 
-void espNowDeinit()
-{
-  if (!espNowMode)
-  {
-    log_w("esp-now already disabled");
-    return;
-  }
-
-  log_w("disabling esp-now");
-  esp_now_deinit();
-  WiFi.mode(WIFI_OFF);
-  espNowMode = false;
+  log_w("esp-now frame received, rssi: %d", rx_ctrl->rssi);
+  receiveMessage(data, dataLength, rx_ctrl->rssi, true);
 }
 
 void espNowInit()
 {
-  if (espNowMode)
+  if (isEspNowInit)
   {
     log_w("esp-now already enabled");
     return;
@@ -811,14 +857,22 @@ void espNowInit()
   }
 
   esp_now_register_recv_cb(espNowOnReceive);
-  espNowMode = true;
+
+  isEspNowInit = true;
 }
 
-void loraInit()
+void espNowDeinit()
 {
-  lora.Init(&Serial2, 9600, SERIAL_8N1, 1, 2);
-  lora.SetDefaultConfigValue(loraConfig);
-  lora.InitLoRaSetting(loraConfig);
+  if (!isEspNowInit)
+  {
+    log_w("esp-now already disabled");
+    return;
+  }
+
+  log_w("disabling esp-now");
+  esp_now_deinit();
+  WiFi.mode(WIFI_OFF);
+  isEspNowInit = false;
 }
 
 void loraReceiveTask(void *pvParameters)
@@ -826,10 +880,47 @@ void loraReceiveTask(void *pvParameters)
   while (1)
   {
     if (lora.RecieveFrame(&loraFrame) == 0)
-      receiveMessage(loraFrame.recv_data, loraFrame.recv_data_len, loraFrame.rssi);
+    {
+      log_w("lora frame received, rssi: %d", loraFrame.rssi);
+      receiveMessage(loraFrame.recv_data, loraFrame.recv_data_len, loraFrame.rssi, false);
+    }
 
     delay(1);
   }
+}
+
+void loraInit()
+{
+  if (isLoraInit)
+  {
+    log_w("LoRa already enabled");
+    return;
+  }
+
+  log_w("enabling LoRa");
+
+  lora.Init(&Serial2, 9600, SERIAL_8N1, 1, 2);
+  lora.SetDefaultConfigValue(loraConfig);
+  lora.InitLoRaSetting(loraConfig);
+  xTaskCreateUniversal(loraReceiveTask, "loraReceiveTask", 8192, NULL, 1, &loraReceiveTaskHandle, APP_CPU_NUM);
+
+  isLoraInit = true;
+}
+
+void loraDeinit()
+{
+  if (!isLoraInit)
+  {
+    log_w("LoRa already disabled");
+    return;
+  }
+
+  log_w("disabling LoRa");
+
+  vTaskDelete(loraReceiveTaskHandle);
+  loraReceiveTaskHandle = NULL;
+
+  isLoraInit = false;
 }
 
 bool updateStringFromInput(Keyboard_Class::KeysState keyState, String &str, int maxLength = 255, bool alphaNumericOnly = false)
@@ -838,14 +929,18 @@ bool updateStringFromInput(Keyboard_Class::KeysState keyState, String &str, int 
 
   for (auto i : keyState.word)
   {
-    if (str.length() < maxLength && (!alphaNumericOnly || std::isalnum(i)))
+    if (str.length() >= maxLength)
     {
-      str += i;
-      updated = true;
+      log_e("max length reached (%d): [%s]!+[%s]", maxLength, str.c_str(), String(i).c_str());
+    }
+    else if (alphaNumericOnly && !std::isalnum(i))
+    {
+      log_e("non-alphanumeric character: [%s]!+[%s]", str.c_str(), String(i).c_str());
     }
     else
     {
-      log_e("max length reached: [%s]\n + %c", str.c_str(), i);
+      str += i;
+      updated = true;
     }
   }
 
@@ -867,7 +962,7 @@ void handleChatTabInput(Keyboard_Class::KeysState keyState, uint8_t &redrawFlags
 
   if (keyState.enter)
   {
-    //log_w(chatTab[activeTabIndex].messageBuffer.c_str());
+    // log_w(chatTab[activeTabIndex].messageBuffer.c_str());
 
     chatTab[activeTabIndex].messageBuffer.trim();
 
@@ -966,8 +1061,11 @@ void handleSettingsTabInput(Keyboard_Class::KeysState keyState, uint8_t &redrawF
     {
       if (c == ',' || c == '/')
       {
-        if (!espNowMode)
+        espNowMode = !espNowMode;
+
+        if (espNowMode)
         {
+          loraDeinit();
           espNowInit();
         }
         else
@@ -977,7 +1075,8 @@ void handleSettingsTabInput(Keyboard_Class::KeysState keyState, uint8_t &redrawF
         }
 
         lastRx = lastTx = 0;
-        redrawFlags |= RedrawFlags::MainWindow;
+        maxRssi = -1000;
+        redrawFlags |= RedrawFlags::MainWindow | RedrawFlags::SystemBar;
       }
     }
     break;
@@ -1130,15 +1229,10 @@ void setup()
   drawMainWindow();
 
   if (espNowMode)
-  {
     espNowInit();
-  }
   else
-  {
     loraInit();
-  }
 
-  xTaskCreateUniversal(loraReceiveTask, "loraReceiveTask", 8192, NULL, 1, NULL, APP_CPU_NUM);
   xTaskCreateUniversal(pingTask, "pingTask", 8192, NULL, 1, NULL, APP_CPU_NUM);
   xTaskCreateUniversal(keyboardInputTask, "keyboardInputTask", 8192, NULL, 1, NULL, APP_CPU_NUM);
 }
