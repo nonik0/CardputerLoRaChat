@@ -2,7 +2,7 @@ Simple chat app for M5 Cardputer and the M5 E220 LoRa modules. Doing for my own 
 
 ## Hardware used:
 - [M5 Cardputer](https://shop.m5stack.com/products/m5stack-cardputer-kit-w-m5stamps3])
-- [M5 E220 LoRa module](https://shop.m5stack.com/products/lora-unit-jp-version-with-antenna-e220) (now :sparkle:optional:sparkle: if using ESP-NOW mode, see )
+- [M5 E220 LoRa module](https://shop.m5stack.com/products/lora-unit-jp-version-with-antenna-e220) (now :sparkle:optional:sparkle: if using ESP-NOW mode, see [Settings Tab Details](#settings-tab-details))
 
 ## Overview:
 The interface is split into 5 tabs. The first three tabs are separate chat channels, the next tab shows the status of other users seen, and the last tab is for changing settings. Press the tab key to switch between tabs. The system bar shows the current username, the signal strength of the user seen with the best signal strength, and the Cardputer's current battery level. LoRa modules are currently configured using the default settings from the [LoRa modules's library](https://github.com/m5stack/M5-LoRa-E220-JP). Modules must be configured initially to work, can do so in settings.
