@@ -79,19 +79,19 @@ const uint8_t wh = h - wy;
 uint8_t batteryPct = M5Cardputer.Power.getBatteryLevel();
 int maxRssi = -1000;
 
-void printHexDump(const void *data, size_t size)
+String getHexString(const void *data, size_t size)
 {
-  const unsigned char *bytes = static_cast<const unsigned char *>(data);
+  const byte *bytes = (const byte *)(data);
+  String hexDump = "";
 
   for (size_t i = 0; i < size; ++i)
   {
-    USBSerial.printf("%02x ", bytes[i]);
-    if ((i + 1) % 16 == 0)
-    {
-      printf("\n");
-    }
+    char hex[4];
+    snprintf(hex, sizeof(hex), "%02x ", bytes[i]);
+    hexDump += hex;
   }
-  USBSerial.print("\n");
+
+  return hexDump; // Return the accumulated hex dump string
 }
 
 void saveScreenshot()
@@ -556,11 +556,11 @@ void readConfigFromSd()
   File configFile = SD.open(SettingsFilename, FILE_READ);
   if (!configFile)
   {
-    USBSerial.println("config file " + SettingsFilename + " not found");
+    log_w("config file not found: %s", SettingsFilename.c_str());
     return;
   }
 
-  USBSerial.println("reading config file: " + SettingsFilename);
+  log_w("reading config file: %s", SettingsFilename.c_str());
 
   while (configFile.available())
   {
@@ -576,27 +576,27 @@ void readConfigFromSd()
     if (name == "username")
     {
       username = value.substring(0, MaxUsernameLength);
-      USBSerial.println("username: " + username);
+      log_w("username: %s", username);
     }
     else if (name == "brightness")
     {
       brightness = value.toInt();
-      USBSerial.println("brightness: " + String(brightness));
+      log_w("brightness: %s", String(brightness));
     }
     else if (name == "pingmode")
     {
       pingMode = (value == "true" || value == "1" || value == "on");
-      USBSerial.println("pingMode: " + String(pingMode));
+      log_w("pingMode: %s", String(pingMode));
     }
     else if (name == "repeatmode")
     {
       repeatMode = (value == "true" || value == "1" || value == "on");
-      USBSerial.println("repeatMode: " + String(repeatMode));
+      log_w("repeatMode: %s", String(repeatMode));
     }
     else if (name == "espnowmode")
     {
       espNowMode = (value == "true" || value == "1" || value == "on");
-      USBSerial.println("espNowMode: " + String(repeatMode));
+      log_w("espNowMode: %s", String(repeatMode));
     }
   }
 
@@ -617,7 +617,7 @@ bool writeConfigToSd()
     return false;
   }
 
-  USBSerial.println("writing config file: " + SettingsFilename);
+  log_w("writing config file: %s", SettingsFilename.c_str());
 
   configFile.println("username=" + username);
   configFile.println("brightness=" + String(brightness));
@@ -637,7 +637,7 @@ void createFrame(int channel, const String &messageText, uint8_t *frameData, siz
   //   std::cerr << "Error: Insufficient space to create the message." << std::endl;
   //   return;
   // }
-  USBSerial.printf("creating frame: |%d|%d|%s|%s|\n", channel, messageNonce, username, messageText);
+  log_w("creating frame: |%d|%d|%s|%s|", channel, messageNonce, username, messageText);
   frameDataLength = 0;
 
   frameData[0] = (messageNonce & 0x3F) | ((channel & 0x03) << 6);
@@ -672,7 +672,7 @@ void parseFrame(const uint8_t *frameData, size_t frameDataLength, Message &messa
   size_t messageLength = frameDataLength - frameBytesRead;
   message.text = String((const char *)(frameData + frameBytesRead), messageLength).c_str();
 
-  USBSerial.printf("parsed frame: |%d|%d|%s|%s|\n", message.channel, message.nonce, message.username, message.text.c_str());
+  log_w("parsed frame: |%d|%d|%s|%s|", message.channel, message.nonce, message.username, message.text.c_str());
 }
 
 bool sendMessage(int channel, const String &messageText, Message &sentMessage)
@@ -681,15 +681,12 @@ bool sendMessage(int channel, const String &messageText, Message &sentMessage)
   size_t frameDataLength;
   createFrame(channel, messageText, frameData, frameDataLength);
 
-  USBSerial.print("sending frame:");
-  printHexDump(frameData, frameDataLength);
+  log_w("sending frame: %s", getHexString(frameData, frameDataLength).c_str());
 
   int result;
   if (!espNowMode && (result = lora.SendFrame(loraConfig, frameData, frameDataLength)) == 0 ||
       espNowMode && (result = esp_now_send(espNowBroadcastAddress, frameData, frameDataLength)) == ESP_OK)
   {
-    USBSerial.println();
-
     sentMessage.channel = channel;
     sentMessage.nonce = messageNonce++;
     sentMessage.username = "";
@@ -714,6 +711,8 @@ bool sendMessage(int channel, const String &messageText, Message &sentMessage)
 
 void receiveMessage(const uint8_t *frameData, size_t frameDataLength, int rssi)
 {
+  log_w("received frame: %s", getHexString(frameData, frameDataLength).c_str());
+
   Message message;
   parseFrame(frameData, frameDataLength, message);
   message.rssi = rssi;
@@ -779,6 +778,7 @@ void espNowDeinit()
   log_w("disabling esp-now");
   esp_now_deinit();
   WiFi.mode(WIFI_OFF);
+  espNowMode = false;
 }
 
 void espNowInit()
@@ -811,6 +811,7 @@ void espNowInit()
   }
 
   esp_now_register_recv_cb(espNowOnReceive);
+  espNowMode = true;
 }
 
 void loraInit()
@@ -844,7 +845,7 @@ bool updateStringFromInput(Keyboard_Class::KeysState keyState, String &str, int 
     }
     else
     {
-      USBSerial.printf("max length reached: [%s]\n + %c", str.c_str(), i);
+      log_e("max length reached: [%s]\n + %c", str.c_str(), i);
     }
   }
 
@@ -866,7 +867,7 @@ void handleChatTabInput(Keyboard_Class::KeysState keyState, uint8_t &redrawFlags
 
   if (keyState.enter)
   {
-    USBSerial.println(chatTab[activeTabIndex].messageBuffer);
+    //log_w(chatTab[activeTabIndex].messageBuffer.c_str());
 
     chatTab[activeTabIndex].messageBuffer.trim();
 
@@ -965,10 +966,7 @@ void handleSettingsTabInput(Keyboard_Class::KeysState keyState, uint8_t &redrawF
     {
       if (c == ',' || c == '/')
       {
-        espNowMode = !espNowMode;
-        redrawFlags |= RedrawFlags::MainWindow;
-
-        if (espNowMode)
+        if (!espNowMode)
         {
           espNowInit();
         }
@@ -977,6 +975,9 @@ void handleSettingsTabInput(Keyboard_Class::KeysState keyState, uint8_t &redrawF
           espNowDeinit();
           loraInit();
         }
+
+        lastRx = lastTx = 0;
+        redrawFlags |= RedrawFlags::MainWindow;
       }
     }
     break;
@@ -1103,9 +1104,6 @@ void setup()
   USBSerial.begin(115200);
   auto cfg = M5.config();
   M5Cardputer.begin(cfg, true);
-
-  delay(1000);
-  USBSerial.println("setup");
 
   checkForMenuBoot();
   readConfigFromSd();
