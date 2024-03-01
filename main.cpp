@@ -1,7 +1,6 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <M5Cardputer.h>
-#include <M5StackUpdater.h>
 #include <M5_LoRa_E220_JP.h>
 #include <WiFi.h>
 
@@ -566,17 +565,6 @@ bool sdCardInit()
   }
 
   return sdInit;
-}
-
-void checkForMenuBoot()
-{
-  M5Cardputer.update();
-
-  if (M5Cardputer.Keyboard.isKeyPressed('a') && sdCardInit())
-  {
-    updateFromFS(SD, "/menu.bin");
-    ESP.restart();
-  }
 }
 
 void readConfigFromSd()
@@ -1204,9 +1192,6 @@ void setup()
   auto cfg = M5.config();
   M5Cardputer.begin(cfg, true);
 
-  checkForMenuBoot();
-  readConfigFromSd();
-
   M5Cardputer.Display.init();
   M5Cardputer.Display.setRotation(1);
   M5Cardputer.Display.setBrightness(brightness);
@@ -1223,6 +1208,8 @@ void setup()
   chatTab[2] = {2, {}, "", 0};
   activeTabIndex = 0;
   activeSettingIndex = 0;
+
+  readConfigFromSd();
 
   drawSystemBar();
   drawTabBar();
