@@ -45,6 +45,13 @@ jobs:
     steps:
     - name: Download Build Artifact
       uses: actions/download-artifact@v4
+      with:
+        name: CardputerLoRaChat
+        path: LoRaChat.bin
+        if-no-files-found: error
+
+    - name: Show directory structure
+      run: tree
 
     - name: Release ${{ github.ref_name }}
       uses: softprops/action-gh-release@v1
