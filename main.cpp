@@ -2,6 +2,7 @@
 #include <esp_wifi.h>
 #include <M5Cardputer.h>
 #include <M5_LoRa_E220_JP.h>
+#include <SD.h>
 #include <WiFi.h>
 
 #include "common.h"
@@ -682,15 +683,15 @@ void createFrame(int channel, const String &messageText, uint8_t *frameData, siz
   frameData[0] = (messageNonce & 0x3F) | ((channel & 0x03) << 6);
   frameDataLength += 1;
 
-  size_t usernameByteLength = min(username.length() + 1, (unsigned int)MaxUsernameLength + 1);
-  std::memcpy(frameData + frameDataLength, username.c_str(), usernameByteLength);
+  size_t usernameByteLength = std::min(username.length() + 1, (unsigned int)MaxUsernameLength + 1);
+  memcpy(frameData + frameDataLength, username.c_str(), usernameByteLength);
   frameDataLength += usernameByteLength;
 
-  size_t messageTextByteLength = min(messageText.length() + 1, (unsigned int)MaxMessageLength + 1);
+  size_t messageTextByteLength = std::min(messageText.length() + 1, (unsigned int)MaxMessageLength + 1);
   if (messageTextByteLength > 1)
   {
-    std::memcpy(frameData + frameDataLength, messageText.c_str(), messageTextByteLength);
-    frameDataLength += messageTextByteLength;
+  memcpy(frameData + frameDataLength, messageText.c_str(), messageTextByteLength);
+  frameDataLength += messageTextByteLength;
   }
 }
 
