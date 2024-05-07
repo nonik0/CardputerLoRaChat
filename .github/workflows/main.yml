@@ -26,8 +26,16 @@ jobs:
       - name: Build PlatformIO Project
         run: pio run
 
-      - name: Rename Bin File 
-        run: mv .pio/build/m5cardputer/firmware.bin LoRaChat.bin    
+      - name: Install esptool
+        run: |
+          pip install -U esptool
+
+      - name: Create Cardputer Firmware Binary
+        run: |
+          esptool.py --chip esp32s3 merge_bin --output LoRaChat.bin \
+            0x00000 .pio/build/m5cardputer/bootloader.bin \
+            0x08000 .pio/build/m5cardputer/partitions.bin \
+            0x10000 .pio/build/m5cardputer/firmware.bin
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4.3.1
